@@ -33,14 +33,25 @@ class Dataset:
             processed_ihs_df,
             on='date',
             how='left',
-            indicator=True)
+            )
         
-        self.processed_df['log_price'] = np.log(self.processed_df['avg_price_per_liter'])
-        self.processed_df['log_volume'] = np.log(self.processed_df['sales_hectoliters'])
+        self.processed_df['log_price'] = np.log(self.processed_df['avg_price_per_liter'].clip(lower=0.01))
+        self.processed_df['log_volume'] = np.log(self.processed_df['sales_hectoliters'].clip(lower=0.01))
         self.processed_df['log_distribution'] = np.log(self.processed_df['weighted_distribution_tdp_reach'].clip(lower=0.01))
 
         self.price_matrix, self.volume_matrix = self._create_price_volume_matrices()
         self.feature_matrix, self.feature_names = self._create_feature_matrix()
+
+        print("=== DATA VALIDATION ===")
+        print(f"Price matrix - Min: {self.price_matrix.min().min():.4f}, Max: {self.price_matrix.max().max():.4f}")
+        print(f"Volume matrix - Min: {self.volume_matrix.min().min():.4f}, Max: {self.volume_matrix.max().max():.4f}")
+        print(f"Feature matrix - Min: {self.feature_matrix.min().min():.4f}, Max: {self.feature_matrix.max().max():.4f}")
+        
+        # Check for inf/nan
+        print(f"Price matrix inf/nan: {np.isinf(self.price_matrix.values).sum()}/{np.isnan(self.price_matrix.values).sum()}")
+        print(f"Volume matrix inf/nan: {np.isinf(self.volume_matrix.values).sum()}/{np.isnan(self.volume_matrix.values).sum()}")
+        print(f"Feature matrix inf/nan: {np.isinf(self.feature_matrix.values).sum()}/{np.isnan(self.feature_matrix.values).sum()}")
+
 
         results_dict = self.get_model_inputs()     
         return results_dict
