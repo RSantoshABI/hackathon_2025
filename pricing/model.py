@@ -2,6 +2,7 @@ import tensorflow as tf
 import pandas as pd
 import numpy as np
 from typing import Tuple, Dict
+from model_utils import calculate_metrics
 
 
 class ElasticityModel:
@@ -57,11 +58,11 @@ class ElasticityModel:
         predictions = self.predict(log_prices, features)
 
         mse_loss = tf.reduce_mean(tf.square(predictions - true_log_volumes))
-        ridge_loss = self.reg_lambda * (  # Fixed: was self.ridge_lambda
+        ridge_loss = self.reg_lambda * (  
             tf.reduce_sum(tf.square(self.elasticity_matrix))
             + tf.reduce_sum(tf.square(self.feature_coeffs))
         )
-        constraints_loss = self._elasticity_constraint_loss()  # Fixed: added parentheses
+        constraints_loss = self._elasticity_constraint_loss()  
 
         total_loss = mse_loss + ridge_loss + constraints_loss
 
@@ -74,7 +75,7 @@ class ElasticityModel:
 
     def _elasticity_constraint_loss(
         self,
-        penalty_weight: float = 10.0,
+        penalty_weight: float = 50.0,
     ) -> tf.Tensor:
 
         own_elasticities = tf.linalg.diag_part(self.elasticity_matrix)
@@ -102,7 +103,7 @@ class ElasticityModel:
 
         with tf.GradientTape() as tape:
             losses = self.calculate_loss(log_prices, features, true_log_volumes)
-            total_loss = losses["total_loss"]  # Fixed: added quotes
+            total_loss = losses["total_loss"]  
 
         gradients = tape.gradient(
             total_loss,
@@ -124,9 +125,14 @@ class ElasticityModel:
 
     def train(
         self, train_data: Dict, epochs: int = 1000, validation_data: Dict = None
-    ) -> Dict:
+        ) -> Dict:
 
-        history = {"train_loss": [], "val_loss": []}
+        history = {
+            "train_loss": [], 
+            "val_loss": [],
+            "train_metrics": [],
+            "val_metrics": []
+        }
 
         for epoch in range(epochs):
             losses = self._step(
@@ -135,23 +141,49 @@ class ElasticityModel:
                 train_data["log_volumes"],
             )
 
-            history["train_loss"].append(losses["total_loss"].numpy())
+            # CHECK FOR INF/NAN
+            current_loss = losses["total_loss"].numpy()
+            if np.isnan(current_loss) or np.isinf(current_loss):
+                print(f"WARNING: Invalid loss at epoch {epoch}: {current_loss}")
+                print(f"MSE: {losses['mse_loss'].numpy()}")
+                print(f"Ridge: {losses['ridge_loss'].numpy()}")
+                print(f"Constraint: {losses['constraint_loss'].numpy()}")
+                break
 
+            history["train_loss"].append(current_loss)
+
+            # Calculate validation loss
             if validation_data is not None:
                 val_losses = self.calculate_loss(
                     validation_data["log_prices"],
                     validation_data["features"],
                     validation_data["log_volumes"],
                 )
+                history["val_loss"].append(val_losses["total_loss"].numpy())
 
-                history["val_loss"].append(val_losses["total_loss"].numpy())  # Fixed: was "val_losses"
-
+            # Calculate detailed metrics every 100 epochs
             if epoch % 100 == 0:
                 print(f"Epoch {epoch}: Train Loss = {losses['total_loss']:.4f}")
+                
+                # Calculate training metrics
+                train_metrics = calculate_metrics(self, train_data, "train")
+                history["train_metrics"].append({
+                    'epoch': epoch,
+                    **train_metrics
+                })
+                
+                print(f"  Train R²: {train_metrics['train_r2_overall']:.4f}, Train MAPE: {train_metrics['train_mape_overall']:.2f}%")
+                
                 if validation_data is not None:
+                    val_metrics = calculate_metrics(self, validation_data, "val")
+                    history["val_metrics"].append({
+                        'epoch': epoch,
+                        **val_metrics
+                    })
                     print(f"  Val Loss = {val_losses['total_loss']:.4f}")
+                    print(f"  Val R²: {val_metrics['val_r2_overall']:.4f}, Val MAPE: {val_metrics['val_mape_overall']:.2f}%")
 
-        return history  # Fixed: indentation moved outside the loop
+        return history
         
     def get_elasticity_matrix(self) -> np.ndarray:
         return self.elasticity_matrix.numpy()
