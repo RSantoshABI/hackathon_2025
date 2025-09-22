@@ -102,19 +102,12 @@ class Dataset:
         
         for date in unique_dates:
             date_data = self.processed_df[self.processed_df['date'] == date]
-
-            # 1. SKU-specific features (averaged across SKUs for that date)
-            avg_distribution = date_data['log_distribution'].mean()
-            
-            # 2. Macro variables (same for all SKUs on that date)
+            avg_distribution = date_data['log_distribution'].mean()            
             macro_values = date_data[macro_feature_cols].iloc[0] if len(date_data) > 0 else pd.Series(
                 [0] * len(macro_feature_cols), index=macro_feature_cols)
-            
-            # Combine into single row
             row_features = [avg_distribution] + macro_values.tolist()
             features_by_date.append(row_features)
         
-        # Convert to DataFrame
         feature_matrix = pd.DataFrame(features_by_date, 
                                     index=unique_dates, 
                                     columns=feature_cols)
@@ -143,3 +136,63 @@ class Dataset:
             'effective_skus': list(self.price_matrix.columns),
             'n_features': len(self.feature_names)
         }
+
+# EXPERIMENTAL DO NOT RUN
+def process_test_dataset(test_df, sku_mapping):
+    processed_df= test_df.copy()
+
+    processed_df['date'] = pd.to_datetime(processed_df['date'])
+    processed_df['sku'] = (processed_df['brand'].astype(str) + ' ' + processed_df['sub_brand'].astype(str) + ' ' + processed_df['package'].astype(str) + ' ' + processed_df['package_type'].astype(str) + ' ' + processed_df['capacity_number'].astype(str))
+    processed_df['effective_sku'] = processed_df['sku'].map(sku_mapping)
+
+    as_is_cols = ['inflation_cpi', 'interest_rate', 'unemployment_rate']
+    base_adj = ['cpi', 'wholesale_price_index']
+    log_transform = ['retail_sales', 'consumption_total', 'domestic_demand', 'gdp_per_capita', 'gdp_real', 'fixed_investment','gross_capital_formation']
+
+    feature_cols = [col for col in processed_df.columns if col != 'date']
+    for col in feature_cols:
+        if col in as_is_cols:
+            processed_df[col] = processed_df[col]
+        elif col in base_adj:
+            processed_df[col] = processed_df[col] / processed_df[col].iloc[0]
+        elif col in log_transform:
+            processed_df[col] = np.log(processed_df[col].clip(lower=0.01))
+        else:
+            pass
+        
+    processed_df_agg = processed_df.groupby([
+        'date','sku']).mean().reset_index()
+
+    processed_df_agg['log_price'] = np.log(processed_df_agg['avg_price_per_liter'].clip(lower=0.01))
+    processed_df_agg['log_volume'] = 0
+    processed_df_agg['log_distribution'] = np.log(processed_df_agg['weighted_distribution_tdp_reach'].clip(lower=0.01))
+
+    price_matrix = processed_df_agg.pivot(
+            index='date', columns='sku', values='log_price'
+        ).fillna(method='ffill').fillna(method='bfill')
+
+    volume_matrix = processed_df_agg.pivot(
+        index='date', columns='sku', values='log_volume'
+    ).fillna(method='ffill').fillna(method='bfill')
+
+    feature_cols = ['log_distribution']
+    unique_dates = price_matrix.index
+    macro_feature_cols = [col for col in processed_df_agg.columns if col not in ['log_price','log_volume','log_distribution', 'date', 'effective_sku', 'sales_hectoliters', 'avg_price_per_liter', 'weighted_distribution_tdp_reach', 'original_sku']]
+    feature_cols.extend(macro_feature_cols)
+    features_by_date = []
+    
+    for date in unique_dates:
+        date_data = processed_df_agg[processed_df_agg['date'] == date]
+        avg_distribution = date_data['log_distribution'].mean()            
+        macro_values = date_data[macro_feature_cols].iloc[0] if len(date_data) > 0 else pd.Series(
+            [0] * len(macro_feature_cols), index=macro_feature_cols)
+        row_features = [avg_distribution] + macro_values.tolist()
+        features_by_date.append(row_features)
+    
+    feature_matrix = pd.DataFrame(features_by_date, 
+                                index=unique_dates, 
+                                columns=feature_cols)
+    
+    feature_matrix = feature_matrix.fillna(method='ffill').fillna(method='bfill')
+
+    return processed_df_agg, price_matrix, volume_matrix, feature_matrix
