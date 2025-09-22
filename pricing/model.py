@@ -75,7 +75,7 @@ class ElasticityModel:
 
     def _elasticity_constraint_loss(
         self,
-        penalty_weight: float = 0.0,
+        penalty_weight: float = 50.0,
     ) -> tf.Tensor:
 
         own_elasticities = tf.linalg.diag_part(self.elasticity_matrix)
