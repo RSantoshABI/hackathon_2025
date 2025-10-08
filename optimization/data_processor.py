@@ -5,6 +5,7 @@ Handles data loading, cleaning, preprocessing, and feature engineering.
 
 import numpy as np
 import pandas as pd
+from datetime import datetime
 from typing import Tuple, Dict, List
 
 
@@ -29,76 +30,150 @@ class DataProcessor:
         self.max_period = max_period
         self.vilc_gr = vilc_gr
 
-    def parse_period(self, period_str: str) -> Tuple[int, int]:
-        """Parse period string to year and month."""
-        try:
-            year_str, month_str = period_str.strip().split('-')
-            year = int(year_str)
-            month = int(month_str.lstrip('0') or '0')
-            if not (1 <= month <= 12):
-                raise ValueError
-            return year, month
-        except Exception:
-            raise ValueError(
-                f"Invalid Period Format: '{period_str}'. Use 'YYYY-M'.")
-
-    def period_to_str(self, year: int, month: int) -> str:
-        """Convert year and month to period string."""
-        return f"{year}-{month:02d}"
-
-    def is_within_scope(self, year: int, month: int) -> bool:
-        """Check if period is within allowed range."""
-        min_year, min_month = self.parse_period(self.min_period)
-        max_year, max_month = self.parse_period(self.max_period)
-        return (year, month) >= (min_year, min_month) and (year, month) <= (max_year, max_month)
-
-    def get_valid_period(self, period_str: str, valid_periods: set) -> Tuple[str, bool]:
+    def generate_periods(
+        self, start_period: str, end_period: str
+    ) -> List[str]:
         """
-        Check if period is in the dataframe or fallback to previous year.
+        Generate list of periods between start and end dates.
+
+        Args:
+            start_period: Start period in YYYY-MM format
+            end_period: End period in YYYY-MM format
 
         Returns:
-            Tuple of (period_string, is_fallback)
+            List of period strings in YYYY-MM format
         """
-        year, month = self.parse_period(period_str)
+        start_date = datetime.strptime(start_period, "%Y-%m")
+        end_date = datetime.strptime(end_period, "%Y-%m")
+        periods = []
+        current_date = start_date
+        while current_date <= end_date:
+            periods.append(current_date.strftime("%Y-%m"))
+            next_month = current_date.replace(day=28) + pd.DateOffset(days=4)
+            current_date = next_month.replace(day=1)
+        return periods
 
-        if not self.is_within_scope(year, month):
-            raise ValueError(
-                f"Period '{period_str}' is out of allowed range ({self.min_period} to {self.max_period})."
-                )
+    def adjust_period(
+        self, period: str, years_to_subtract: int
+    ) -> str:
+        """
+        Adjust period by subtracting years.
 
-        if period_str in valid_periods:
-            return period_str, False
+        Args:
+            period: Period in YYYY-MM format
+            years_to_subtract: Number of years to subtract
 
-        fallback_year = year - 1
-        fallback_period = self.period_to_str(fallback_year, month)
+        Returns:
+            Adjusted period string in YYYY-MM format
+        """
+        period_date = datetime.strptime(period, "%Y-%m")
+        adjusted_date = period_date.replace(
+            year=period_date.year - years_to_subtract
+        )
+        return adjusted_date.strftime("%Y-%m")
 
-        if not self.is_within_scope(fallback_year, month):
-            raise ValueError(f"Neither '{period_str}' nor its fallback '{fallback_period}' are within allowed range.")
+    def check_periods_in_valid_range(
+        self, periods: List[str], valid_periods: set
+    ) -> Tuple[List[str], Dict[str, str]]:
+        """
+        Check if periods are valid, falling back to prior years if needed.
 
-        if fallback_period in valid_periods:
-            return fallback_period, True
-        else:
-            raise ValueError(f"Period '{period_str}' and fallback '{fallback_period}' are not available in data.")
+        Args:
+            periods: List of periods to check
+            valid_periods: Set of valid periods from the data
 
-    def filter_dataframe(self, df: pd.DataFrame, start_period: str, end_period: str) -> pd.DataFrame:
-        """Filter dataframe by period range."""
-        valid_periods = set(df['year_month'])
+        Returns:
+            Tuple of (adjusted_periods, period_mapping) where
+            period_mapping maps original to adjusted periods
+        """
+        adjusted_periods = []
+        period_mapping = {}
+        for period in periods:
+            original_period = period
+            if period in valid_periods:
+                adjusted_periods.append(period)
+                period_mapping[original_period] = period
+            else:
+                adjusted_period_1 = self.adjust_period(period, 1)
+                if adjusted_period_1 in valid_periods:
+                    adjusted_periods.append(adjusted_period_1)
+                    period_mapping[original_period] = adjusted_period_1
+                else:
+                    adjusted_period_2 = self.adjust_period(
+                        adjusted_period_1, 1
+                    )
+                    if adjusted_period_2 in valid_periods:
+                        adjusted_periods.append(adjusted_period_2)
+                        period_mapping[original_period] = adjusted_period_2
+                    else:
+                        msg = (
+                            f"Period {period} is invalid - "
+                            "no valid data within 2 years prior"
+                        )
+                        raise ValueError(msg)
+        return adjusted_periods, period_mapping
 
-        start_resolved, start_flag = self.get_valid_period(start_period, valid_periods)
-        end_resolved, end_flag = self.get_valid_period(end_period, valid_periods)
+    def filter_dataframe(
+        self, df: pd.DataFrame, start_period: str, end_period: str
+    ) -> pd.DataFrame:
+        """
+        Filter dataframe by period range with intelligent fallback
+        to prior years.
 
-        start_year, start_month = self.parse_period(start_resolved)
-        end_year, end_month = self.parse_period(end_resolved)
+        Args:
+            df: DataFrame with year_month column
+            start_period: Start period in YYYY-MM format
+            end_period: End period in YYYY-MM format
 
-        df['ym_tuple'] = df['year_month'].apply(lambda x: self.parse_period(x))
+        Returns:
+            Filtered DataFrame with used_prior flag indicating which
+            rows used fallback data
+        """
+        valid_periods = set(df['year_month'].unique())
 
-        filtered_df = df[
-            (df['ym_tuple'] >= (start_year, start_month)) &
-            (df['ym_tuple'] <= (end_year, end_month))
-        ].copy()
+        # Generate all periods in the requested range
+        periods_to_check = self.generate_periods(start_period, end_period)
 
-        filtered_df['used_year_ago'] = start_flag or end_flag
-        filtered_df.drop(columns='ym_tuple', inplace=True)
+        # Check which periods are valid and create mapping
+        adjusted_periods, period_mapping = (
+            self.check_periods_in_valid_range(
+                periods_to_check, valid_periods
+            )
+        )
+
+        # Filter dataframe to only include adjusted periods
+        filtered_df = df[df['year_month'].isin(adjusted_periods)].copy()
+
+        # Create reverse mapping to track which periods used fallback
+        period_map_rev = {v: k for k, v in period_mapping.items()}
+        filtered_df['year_month_map'] = (
+            filtered_df['year_month'].map(period_map_rev)
+        )
+
+        # Mark rows that used prior year data
+        filtered_df['used_prior'] = (
+            filtered_df['year_month'] != filtered_df['year_month_map']
+        )
+
+        # Rename columns to keep the mapped period as main year_month
+        filtered_df.rename(
+            columns={'year_month': 'year_month_og'}, inplace=True
+        )
+        filtered_df.rename(
+            columns={'year_month_map': 'year_month'}, inplace=True
+        )
+        filtered_df.drop(columns=['year_month_og'], inplace=True)
+
+        # Reorder columns to put year_month first
+        cols = list(filtered_df.columns)
+        if 'year_month' in cols and 'used_prior' in cols:
+            cols.remove('year_month')
+            cols.remove('used_prior')
+            cols = ['year_month'] + cols + ['used_prior']
+            filtered_df = filtered_df[cols]
+
+        # Sort by year_month and sku for consistency
+        filtered_df = filtered_df.sort_values(by=['year_month', 'sku'])
 
         return filtered_df
 
@@ -144,19 +219,28 @@ class DataProcessor:
             names=['year_month_date', 'sku']
         )
 
-        reference_df['year_month_date'] = pd.to_datetime(reference_df['year_month'])
+        reference_df['year_month_date'] = pd.to_datetime(
+            reference_df['year_month']
+        )
         reference_df = reference_df.set_index(['year_month_date', 'sku'])
 
         reference_df_padded = reference_df.reindex(full_index_own)
 
         reference_df_padded['present'] = 'present'
-        reference_df_padded.loc[reference_df_padded['reference_volume'].isna(), 'present'] = 'missing'
+        mask = reference_df_padded['reference_volume'].isna()
+        reference_df_padded.loc[mask, 'present'] = 'missing'
 
-        reference_df_padded['reference_volume'] = reference_df_padded['reference_volume'].fillna(0)
-        reference_df_padded['sellout_volume'] = reference_df_padded['sellout_volume'].fillna(0)
+        reference_df_padded['reference_volume'] = (
+            reference_df_padded['reference_volume'].fillna(0)
+        )
+        reference_df_padded['sellout_volume'] = (
+            reference_df_padded['sellout_volume'].fillna(0)
+        )
 
         mean_prices = reference_df['reference_price'].mean()
-        reference_df_padded['reference_price'] = reference_df_padded['reference_price'].fillna(mean_prices)
+        reference_df_padded['reference_price'] = (
+            reference_df_padded['reference_price'].fillna(mean_prices)
+        )
 
         for col in ['markup', 'discount', 'excise', 'vilc']:
             if col in reference_df_padded.columns:
@@ -165,11 +249,20 @@ class DataProcessor:
         reference_df_padded = reference_df_padded.reset_index()
 
         year_month_mapping = reference_df.reset_index()
-        year_month_mapping = year_month_mapping[['year_month_date', 'year_month']].drop_duplicates()
+        year_month_mapping = year_month_mapping[
+            ['year_month_date', 'year_month']
+        ].drop_duplicates()
 
-        reference_df_padded = pd.merge(reference_df_padded, year_month_mapping, how='left', on='year_month_date')
-        reference_df_padded = reference_df_padded.drop(columns={'year_month_date', 'year_month_x'})
-        reference_df_padded.rename(columns={'year_month_y': 'year_month'}, inplace=True)
+        reference_df_padded = pd.merge(
+            reference_df_padded, year_month_mapping,
+            how='left', on='year_month_date'
+        )
+        reference_df_padded = reference_df_padded.drop(
+            columns={'year_month_date', 'year_month_x'}
+        )
+        reference_df_padded.rename(
+            columns={'year_month_y': 'year_month'}, inplace=True
+        )
 
         return reference_df_padded
 
@@ -188,24 +281,41 @@ class DataProcessor:
             names=['year_month_date', 'sku']
         )
 
-        competitor_df['year_month_date'] = pd.to_datetime(competitor_df['year_month'])
-        competitor_df = competitor_df.set_index(['year_month_date', 'sku'])
+        competitor_df['year_month_date'] = pd.to_datetime(
+            competitor_df['year_month']
+        )
+        competitor_df = competitor_df.set_index([
+            'year_month_date', 'sku'
+        ])
 
         comp_df_padded = competitor_df.reindex(full_index)
 
-        comp_df_padded['reference_volume'] = comp_df_padded['reference_volume'].fillna(0)
+        comp_df_padded['reference_volume'] = (
+            comp_df_padded['reference_volume'].fillna(0)
+        )
 
         mean_prices = comp_df_padded['reference_price'].mean()
-        comp_df_padded['reference_price'] = comp_df_padded['reference_price'].fillna(mean_prices)
+        comp_df_padded['reference_price'] = (
+            comp_df_padded['reference_price'].fillna(mean_prices)
+        )
 
         comp_df_padded = comp_df_padded.reset_index()
 
         year_month_mapping = competitor_df.reset_index()
-        year_month_mapping = year_month_mapping[['year_month_date', 'year_month']].drop_duplicates()
+        year_month_mapping = year_month_mapping[
+            ['year_month_date', 'year_month']
+        ].drop_duplicates()
 
-        comp_df_padded = pd.merge(comp_df_padded, year_month_mapping, how='left', on='year_month_date')
-        comp_df_padded = comp_df_padded.drop(columns={'year_month_date', 'year_month_x'})
-        comp_df_padded.rename(columns={'year_month_y': 'year_month'}, inplace=True)
+        comp_df_padded = pd.merge(
+            comp_df_padded, year_month_mapping,
+            how='left', on='year_month_date'
+        )
+        comp_df_padded = comp_df_padded.drop(
+            columns={'year_month_date', 'year_month_x'}
+        )
+        comp_df_padded.rename(
+            columns={'year_month_y': 'year_month'}, inplace=True
+        )
 
         return comp_df_padded
 
@@ -257,49 +367,77 @@ class DataProcessor:
         Load and process all data files.
 
         Returns:
-            Tuple of (reference_df, competitor_reference_df, E_own, E_comp, metadata)
+            Tuple of (reference_df, competitor_reference_df,
+            E_own, E_comp, metadata)
         """
         # Load data
         own_to_own_elasticity_df = pd.read_csv(elasticity_path)
         reference_df = pd.read_csv(reference_path)
-        own_to_competitor_elasticity_df = pd.read_csv(competitor_elasticity_path)
+        own_to_competitor_elasticity_df = pd.read_csv(
+            competitor_elasticity_path
+        )
         competitor_reference_df = pd.read_csv(competitor_reference_path)
         seg_mapping = pd.read_csv(seg_mapping_path)
 
-        print(f"Loaded data shapes: {own_to_own_elasticity_df.shape}, {reference_df.shape}, "
-              f"{own_to_competitor_elasticity_df.shape}, {competitor_reference_df.shape}")
+        print(
+            f"Loaded data shapes: "
+            f"{own_to_own_elasticity_df.shape}, "
+            f"{reference_df.shape}, "
+            f"{own_to_competitor_elasticity_df.shape}, "
+            f"{competitor_reference_df.shape}"
+        )
 
         # Filter by period
-        reference_df_filt = self.filter_dataframe(reference_df, start_period, end_period)
-        competitor_reference_df_filt = self.filter_dataframe(competitor_reference_df, start_period, end_period)
+        reference_df_filt = self.filter_dataframe(
+            reference_df, start_period, end_period
+        )
+        competitor_reference_df_filt = self.filter_dataframe(
+            competitor_reference_df, start_period, end_period
+        )
 
         # Apply VILC growth rate for fallback periods
-        reference_df_filt.loc[reference_df_filt['used_year_ago'], 'vilc'] = \
-            reference_df_filt['vilc'] * (1 + self.vilc_gr)
+        mask = reference_df_filt['used_prior']
+        reference_df_filt.loc[mask, 'vilc'] = (
+            reference_df_filt.loc[mask, 'vilc'] * (1 + self.vilc_gr)
+        )
 
-        reference_df = reference_df_filt.drop(columns={'used_year_ago'})
-        competitor_reference_df = competitor_reference_df_filt.drop(columns={'used_year_ago'})
+        reference_df = reference_df_filt.drop(columns={'used_prior'})
+        competitor_reference_df = competitor_reference_df_filt.drop(
+            columns={'used_prior'}
+        )
 
         reference_df = reference_df.reset_index(drop=True)
-        competitor_reference_df = competitor_reference_df.reset_index(drop=True)
+        competitor_reference_df = competitor_reference_df.reset_index(
+            drop=True
+        )
 
         # Preprocess reference files
         own_products_init = reference_df['sku'].unique()
         competitor_products_init = competitor_reference_df['sku'].unique()
 
-        own_to_own_elasticity_df = own_to_own_elasticity_df[
-            own_to_own_elasticity_df['target_sku'].isin(own_products_init)
-        ]
-        own_to_own_elasticity_df = own_to_own_elasticity_df[
-            own_to_own_elasticity_df['other_sku'].isin(own_products_init)
-        ]
+        mask1 = own_to_own_elasticity_df['target_sku'].isin(
+            own_products_init
+        )
+        own_to_own_elasticity_df = own_to_own_elasticity_df[mask1]
 
-        own_to_competitor_elasticity_df = own_to_competitor_elasticity_df[
-            own_to_competitor_elasticity_df['target_sku'].isin(own_products_init)
-        ]
-        own_to_competitor_elasticity_df = own_to_competitor_elasticity_df[
-            own_to_competitor_elasticity_df['other_sku'].isin(competitor_products_init)
-        ]
+        mask2 = own_to_own_elasticity_df['other_sku'].isin(
+            own_products_init
+        )
+        own_to_own_elasticity_df = own_to_own_elasticity_df[mask2]
+
+        mask3 = own_to_competitor_elasticity_df['target_sku'].isin(
+            own_products_init
+        )
+        own_to_competitor_elasticity_df = (
+            own_to_competitor_elasticity_df[mask3]
+        )
+
+        mask4 = own_to_competitor_elasticity_df['other_sku'].isin(
+            competitor_products_init
+        )
+        own_to_competitor_elasticity_df = (
+            own_to_competitor_elasticity_df[mask4]
+        )
 
         reference_df = reference_df[[
             'year_month', 'sku', 'reference_volume', 'reference_price',
@@ -315,8 +453,12 @@ class DataProcessor:
         all_months = reference_df['year_month'].unique()
 
         # Pad dataframes
-        reference_df_padded = self.pad_reference_dataframe(reference_df, own_skus, all_months)
-        reference_df_padded = pd.merge(reference_df_padded, seg_mapping, how='left', on='sku')
+        reference_df_padded = self.pad_reference_dataframe(
+            reference_df, own_skus, all_months
+        )
+        reference_df_padded = pd.merge(
+            reference_df_padded, seg_mapping, how='left', on='sku'
+        )
         reference_df_padded_bound = reference_df_padded.copy()
         reference_df = reference_df_padded.drop(columns={'present'})
 
@@ -326,7 +468,9 @@ class DataProcessor:
         )
 
         # Add pack type and size group
-        reference_df['pack_type'] = reference_df['sellin_sku'].apply(self.extract_pack_type)
+        reference_df['pack_type'] = reference_df['sellin_sku'].apply(
+            self.extract_pack_type
+        )
         reference_df.loc[
             (reference_df['pack_type'] == 'UNKNOWN') &
             (reference_df['sku'].str.contains('NO RETORNABLE')),
@@ -338,7 +482,9 @@ class DataProcessor:
             'pack_type'
         ] = 'RB'
 
-        reference_df['size_group'] = reference_df.apply(self.assign_size_group, axis=1)
+        reference_df['size_group'] = reference_df.apply(
+            self.assign_size_group, axis=1
+        )
 
         # Prepare elasticity matrices
         own_products = reference_df['sku'].unique()
@@ -355,8 +501,14 @@ class DataProcessor:
         E_price_to_volume = self.prepare_elasticity_matrix(
             own_to_own_elasticity_df, own_index, num_own
         )
-        E_price_to_comp_volume = self.prepare_competitor_elasticity_matrix(
-            own_to_competitor_elasticity_df, own_index, competitor_index, num_own, num_comp
+        E_price_to_comp_volume = (
+            self.prepare_competitor_elasticity_matrix(
+                own_to_competitor_elasticity_df,
+                own_index,
+                competitor_index,
+                num_own,
+                num_comp
+            )
         )
 
         metadata = {
@@ -371,4 +523,10 @@ class DataProcessor:
             'reference_df_padded_bound': reference_df_padded_bound
         }
 
-        return reference_df, competitor_reference_df, E_price_to_volume, E_price_to_comp_volume, metadata
+        return (
+            reference_df,
+            competitor_reference_df,
+            E_price_to_volume,
+            E_price_to_comp_volume,
+            metadata
+        )

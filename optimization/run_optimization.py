@@ -23,7 +23,6 @@ def run_optimization(
     target_delta: float = 0.06,
     VAT: float = 0.19,
     VILC_GR: float = 0.0378,
-    n_jobs: int = -1,
     tolerance: float = 0.005,
     output_dir: str = 'optimization_results'
 ):
@@ -89,9 +88,8 @@ def run_optimization(
         E_price_to_volume=E_price_to_volume,
         E_price_to_comp_volume=E_price_to_comp_volume,
         VAT=VAT,
-        n_jobs=n_jobs
     )
-    print(f"   ✓ Optimizer ready with {n_jobs} parallel jobs")
+    print(f"   ✓ Optimizer ready!")
 
     # Step 3: Create Constraints
     print("\n3. Setting up constraints...")
