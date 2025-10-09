@@ -1056,6 +1056,21 @@ def display_graphical_summary(results):
     else:
         x_axis_labels = x_axis
     
+    # Prepare bar texts so arrow is centered above value for optimized bars
+    ref_texts = [f"${v:.2f}" for v in y_ref]
+    opt_texts = []
+    opt_colors = []  # per-point colors: green for increase, red for decrease
+    for r, o in zip(y_ref, y_opt):
+        try:
+            is_increase = float(o) >= float(r)
+        except Exception:
+            is_increase = True
+        arrow = '⬆' if is_increase else '⬇'
+        opt_texts.append(f"{arrow}<br>${o:.2f}")
+        opt_colors.append(
+            '#2ECC71' if is_increase else '#E74C3C'
+        )  # green / red
+
     fig_price_arch.add_trace(go.Bar(
         name='Reference',
         x=x_axis_labels,
@@ -1063,11 +1078,11 @@ def display_graphical_summary(results):
         marker_color=colors['ref_color'],
         marker_line_color=colors['border_ref'],
         marker_line_width=1.5,
-        text=[f"${v:.2f}" for v in y_ref],
+        text=ref_texts,
         textposition='outside',
         textfont=dict(size=14, color=colors['light_grey'])
     ))
-    
+
     fig_price_arch.add_trace(go.Bar(
         name='Optimized',
         x=x_axis_labels,
@@ -1075,9 +1090,12 @@ def display_graphical_summary(results):
         marker_color=colors['opt_color'],
         marker_line_color=colors['border_opt'],
         marker_line_width=1.5,
-        text=[f"${v:.2f}" for v in y_opt],
+        text=opt_texts,
         textposition='outside',
-        textfont=dict(size=14, color=colors['light_grey'])
+        textfont=dict(
+            size=18,
+            color=opt_colors
+        )  # larger & dynamic colors
     ))
     
     # Determine bar width based on number of categories
@@ -1091,6 +1109,8 @@ def display_graphical_summary(results):
         bargap = 0.15
         bargroupgap = 0.1
     
+    # Add extra headroom for arrow annotations
+    headroom_factor_arch = 1.30
     fig_price_arch.update_layout(
         barmode='group',
         xaxis_title=view_option,
@@ -1100,7 +1120,10 @@ def display_graphical_summary(results):
         plot_bgcolor=colors['card_bg'],
         paper_bgcolor='#1a1a1a',
         font=dict(color=colors['light_grey'], size=12),
-        yaxis=dict(gridcolor='#3d3d3d', range=[0, max(max(y_ref), max(y_opt)) * 1.15]),
+        yaxis=dict(
+            gridcolor='#3d3d3d',
+            range=[0, max(max(y_ref), max(y_opt)) * headroom_factor_arch]
+        ),
         legend=dict(
             orientation="h",
             yanchor="bottom",
@@ -1117,6 +1140,8 @@ def display_graphical_summary(results):
         bargroupgap=bargroupgap
     )
     
+    # Arrows embedded in optimized bar text
+
     st.plotly_chart(fig_price_arch, use_container_width=True)
     
     # CARD 2: Portfolio Impact and Financial Summary (Full Width)
@@ -1137,7 +1162,7 @@ def display_graphical_summary(results):
     with col2_2:
         level_option = st.selectbox(
             "Select Level:",
-            options=["Aggregate", "Segment", "Size"],
+            options=["Aggregate", "Segment", "Size", "Brand"],
             index=0,
             key="portfolio_level"
     )
@@ -1152,24 +1177,39 @@ def display_graphical_summary(results):
     if metric_option in ["NR/HL", "MACO/HL"]:
         # Calculate per HL metrics
         if level_option == "Aggregate":
-            ref_val = (monthly_df['NR_ref'].sum() /
-                      monthly_df['volume_ref'].sum()
-                      if metric_option == "NR/HL"
-                      else monthly_df['MACO_ref'].sum() /
-                           monthly_df['volume_ref'].sum())
-            opt_val = (monthly_df['NR_opt'].sum() /
-                      monthly_df['volume_opt'].sum()
-                      if metric_option == "NR/HL"
-                      else monthly_df['MACO_opt'].sum() /
-                           monthly_df['volume_opt'].sum())
+            if metric_option == "NR/HL":
+                ref_val = (
+                    monthly_df['NR_ref'].sum() /
+                    monthly_df['volume_ref'].sum()
+                )
+                opt_val = (
+                    monthly_df['NR_opt'].sum() /
+                    monthly_df['volume_opt'].sum()
+                )
+            else:
+                ref_val = (
+                    monthly_df['MACO_ref'].sum() /
+                    monthly_df['volume_ref'].sum()
+                )
+                opt_val = (
+                    monthly_df['MACO_opt'].sum() /
+                    monthly_df['volume_opt'].sum()
+                )
             x_labels = ['Total']
             y_ref_vals = [ref_val]
             y_opt_vals = [opt_val]
         else:
             if level_option == "Segment":
                 group_col = 'segment'
-            else:
-                # For Size, use size_group if available, fallback to segment
+            elif level_option == "Brand":
+                if 'brand' in monthly_df.columns:
+                    group_col = 'brand'
+                else:
+                    st.warning(
+                        "⚠️ brand column not found, using segment instead"
+                    )
+                    group_col = 'segment'
+            else:  # Size
                 if 'size_group' in monthly_df.columns:
                     group_col = 'size_group'
                 else:
@@ -1183,10 +1223,12 @@ def display_graphical_summary(results):
                     'volume_ref': 'sum',
                     'volume_opt': 'sum'
                 })
-                grouped['ref_per_hl'] = (grouped['NR_ref'] /
-                                        grouped['volume_ref'])
-                grouped['opt_per_hl'] = (grouped['NR_opt'] /
-                                        grouped['volume_opt'])
+                grouped['ref_per_hl'] = (
+                    grouped['NR_ref'] / grouped['volume_ref']
+                )
+                grouped['opt_per_hl'] = (
+                    grouped['NR_opt'] / grouped['volume_opt']
+                )
             else:
                 grouped = monthly_df.groupby(group_col).agg({
                     'MACO_ref': 'sum',
@@ -1194,10 +1236,12 @@ def display_graphical_summary(results):
                     'volume_ref': 'sum',
                     'volume_opt': 'sum'
                 })
-                grouped['ref_per_hl'] = (grouped['MACO_ref'] /
-                                        grouped['volume_ref'])
-                grouped['opt_per_hl'] = (grouped['MACO_opt'] /
-                                        grouped['volume_opt'])
+                grouped['ref_per_hl'] = (
+                    grouped['MACO_ref'] / grouped['volume_ref']
+                )
+                grouped['opt_per_hl'] = (
+                    grouped['MACO_opt'] / grouped['volume_opt']
+                )
             
             x_labels = grouped.index.tolist()
             y_ref_vals = grouped['ref_per_hl'].tolist()
@@ -1215,8 +1259,15 @@ def display_graphical_summary(results):
         else:
             if level_option == "Segment":
                 group_col = 'segment'
-            else:
-                # For Size, use size_group if available, fallback to segment
+            elif level_option == "Brand":
+                if 'brand' in monthly_df.columns:
+                    group_col = 'brand'
+                else:
+                    st.warning(
+                        "⚠️ brand column not found, using segment instead"
+                    )
+                    group_col = 'segment'
+            else:  # Size
                 if 'size_group' in monthly_df.columns:
                     group_col = 'size_group'
                 else:
@@ -1235,6 +1286,23 @@ def display_graphical_summary(results):
     # Create visualization
     fig_portfolio = go.Figure()
     
+    # Prepare texts for portfolio chart (arrow centered above optimized value)
+    ref_texts_port = [
+        f"{v:,.0f}" if v >= 100 else f"{v:.2f}"
+        for v in y_ref_vals
+    ]
+    opt_texts_port = []
+    opt_colors_port = []
+    for r, o in zip(y_ref_vals, y_opt_vals):
+        try:
+            is_increase = float(o) >= float(r)
+        except Exception:
+            is_increase = True
+        arrow = '⬆' if is_increase else '⬇'
+        val_str = f"{o:,.0f}" if o >= 100 else f"{o:.2f}"
+        opt_texts_port.append(f"{arrow}<br>{val_str}")
+        opt_colors_port.append('#2ECC71' if is_increase else '#E74C3C')
+
     fig_portfolio.add_trace(go.Bar(
         name='Reference',
         x=x_labels,
@@ -1242,12 +1310,11 @@ def display_graphical_summary(results):
         marker_color=colors['ref_color'],
         marker_line_color=colors['border_ref'],
         marker_line_width=1.5,
-        text=[f"{v:,.0f}" if v >= 100 else f"{v:.2f}"
-              for v in y_ref_vals],
+        text=ref_texts_port,
         textposition='outside',
         textfont=dict(size=14, color=colors['light_grey'])
     ))
-    
+
     fig_portfolio.add_trace(go.Bar(
         name='Optimized',
         x=x_labels,
@@ -1255,10 +1322,9 @@ def display_graphical_summary(results):
         marker_color=colors['opt_color'],
         marker_line_color=colors['border_opt'],
         marker_line_width=1.5,
-        text=[f"{v:,.0f}" if v >= 100 else f"{v:.2f}"
-              for v in y_opt_vals],
+        text=opt_texts_port,
         textposition='outside',
-        textfont=dict(size=14, color=colors['light_grey'])
+        textfont=dict(size=18, color=opt_colors_port)
     ))
     
     # Determine bar width based on number of categories
@@ -1272,9 +1338,13 @@ def display_graphical_summary(results):
         bargap = 0.15
         bargroupgap = 0.1
     
-    # Calculate y-axis range with headroom
-    max_val = max(max(y_ref_vals), max(y_opt_vals))
+    # Calculate y-axis range with extra headroom (for arrows)
+    max_val = (
+        max(max(y_ref_vals), max(y_opt_vals))
+        if len(y_ref_vals) > 0 else 0
+    )
     
+    headroom_factor_port = 1.30
     fig_portfolio.update_layout(
         barmode='group',
         xaxis_title=level_option,
@@ -1284,7 +1354,10 @@ def display_graphical_summary(results):
         plot_bgcolor=colors['card_bg'],
         paper_bgcolor='#1a1a1a',
         font=dict(color=colors['light_grey'], size=12),
-        yaxis=dict(gridcolor='#3d3d3d', range=[0, max_val * 1.15]),
+        yaxis=dict(
+            gridcolor='#3d3d3d',
+            range=[0, max_val * headroom_factor_port if max_val > 0 else 1]
+        ),
         legend=dict(
             orientation="h",
             yanchor="bottom",
@@ -1301,6 +1374,8 @@ def display_graphical_summary(results):
         bargroupgap=bargroupgap
     )
     
+    # Arrows embedded in optimized bar text
+
     st.plotly_chart(fig_portfolio, use_container_width=True)
 
 
@@ -1312,12 +1387,15 @@ def display_constraints_summary(results):
     monthly_df = results['monthly_outputs']
     industry_df = results['industry_volumes']
     target_delta = results['target_delta']
+    # Tolerance for PINC expressed as a relative proportion (e.g. 0.005 = 0.5 percentage points)
     tolerance = 0.005
     
     # Calculate constraint values
     total_ref_volume = industry_df['volume_ref'].sum()
     total_opt_volume = industry_df['volume_opt'].sum()
-    abi_ref_volume = industry_df[industry_df['manufacturer']=='ABI']['volume_ref'].sum()
+    abi_ref_volume = industry_df[
+        industry_df['manufacturer'] == 'ABI'
+    ]['volume_ref'].sum()
     abi_opt_volume = industry_df[industry_df['manufacturer']=='ABI']['volume_opt'].sum()
 
     ref_ms = abi_ref_volume / total_ref_volume
@@ -1365,13 +1443,17 @@ def display_constraints_summary(results):
     })
     
     # 4. Portfolio PINC Constraint
-    pinc_lower = (1 + target_delta) * ref_ppl - tolerance
-    pinc_upper = (1 + target_delta) * ref_ppl + tolerance
-    pinc_status = "✅ SATISFIED" if (pinc_lower <= opt_ppl <= pinc_upper) else "❌ VIOLATED"
+    # Use RELATIVE tolerance (percentage points) instead of subtracting absolute currency units
+    # Old (incorrect) absolute method shrank window for higher price levels.
+    pinc_lower = (1 + target_delta - tolerance) * ref_ppl
+    pinc_upper = (1 + target_delta + tolerance) * ref_ppl
+    pinc_status = (
+        "✅ SATISFIED" if (pinc_lower <= opt_ppl <= pinc_upper) else "❌ VIOLATED"
+    )
     
     constraints_data.append({
         'Constraint': 'Portfolio PINC',
-        'Target': f"{target_delta:.2%} ± {tolerance:.3f}",
+        'Target': f"{target_delta:.2%} ± {tolerance*100:.2f}pp",
         'Actual': f"{pinc_delta:.4%}",
         'Status': pinc_status
     })
@@ -1533,9 +1615,9 @@ def display_constraints_summary(results):
         """)
         
         st.markdown(f"""
-        - **Portfolio PINC:** {pinc_delta:.4%}
-        - **Target:** {target_delta:.4%}
-        - **Deviation:** {abs(pinc_delta - target_delta):.4%} (Tol: {tolerance:.4f})
+    - **Portfolio PINC:** {pinc_delta:.4%}
+    - **Target:** {target_delta:.4%}
+    - **Deviation:** {abs(pinc_delta - target_delta):.4%} (Tol: {tolerance:.2%} rel)
         """)
 
 def display_results_page():
