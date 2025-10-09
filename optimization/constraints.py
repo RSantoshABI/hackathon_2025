@@ -1,267 +1,311 @@
 """
-Constraints module for price optimization.
-Defines all optimization constraints.
+Constraints Module for Price Optimization
+
+This module defines all optimization constraints and penalty functions.
 """
 
 import numpy as np
 from scipy.optimize import NonlinearConstraint
 
 
-class ConstraintManager:
-    """Manages optimization constraints."""
+def penalty_ordering(
+    nr, vol, segment_labels, size_labels, segment_order, size_order,
+    seg_lambda=1e5, size_lambda=1e5
+):
+    """
+    Calculate penalty for segment and size hierarchy constraint violations.
+    """
+    penalty = 0.0
 
-    def __init__(
-        self,
-        reference_df,
-        competitor_reference_df,
-        own_products,
-        competitor_products,
-        months,
-        num_months,
-        num_own,
-        num_comp,
-        E_price_to_volume,
-        E_price_to_comp_volume,
-        target_delta,
-        VAT,
-        get_reference_arrays_own_func,
-        get_reference_arrays_comp_func,
-        calc_volume_func,
-        calc_MACO_func
-    ):
-        """
-        Initialize constraint manager with all necessary data and functions.
-        """
-        self.reference_df = reference_df
-        self.competitor_reference_df = competitor_reference_df
-        self.own_products = own_products
-        self.competitor_products = competitor_products
-        self.months = months
-        self.num_months = num_months
-        self.num_own = num_own
-        self.num_comp = num_comp
-        self.E_price_to_volume = E_price_to_volume
-        self.E_price_to_comp_volume = E_price_to_comp_volume
-        self.target_delta = target_delta
-        self.VAT = VAT
+    segment_means = {
+        seg: nr[np.array(segment_labels) == seg].sum() /
+        vol[np.array(segment_labels) == seg].sum()
+        for seg in segment_order
+        if np.any(np.array(segment_labels) == seg)
+    }
 
-        # Store functions
-        self.get_reference_arrays_own = get_reference_arrays_own_func
-        self.get_reference_arrays_comp = get_reference_arrays_comp_func
-        self.calc_volume = calc_volume_func
-        self.calc_MACO = calc_MACO_func
+    for i in range(len(segment_order) - 1):
+        left, right = segment_order[i], segment_order[i+1]
+        if left in segment_means and right in segment_means:
+            diff = segment_means[left] - segment_means[right]
+            if diff > 0:
+                penalty += seg_lambda * diff
 
-        # Precompute reference values
-        self.total_ref_industry_volume = (
-            np.sum(reference_df['sellout_volume'].values) +
-            np.sum(competitor_reference_df['reference_volume'].values)
+    size_means = {
+        s: nr[np.array(size_labels) == s].sum() /
+        vol[np.array(size_labels) == s].sum()
+        for s in size_order
+        if np.any(np.array(size_labels) == s)
+    }
+    for i in range(len(size_order) - 1):
+        left, right = size_order[i], size_order[i+1]
+        if left in size_means and right in size_means:
+            diff = size_means[right] - size_means[left]
+            if diff > 0:
+                penalty += size_lambda * diff
+
+    return penalty
+
+
+def round_to_nearest_50(price_array, ref_price_array):
+    """Round price differences to nearest multiple of 50."""
+    price_diff = price_array - ref_price_array
+    price_diff_rounded = 50 * np.round(price_diff / 50)
+    return ref_price_array + price_diff_rounded
+
+
+def create_constraint_functions(
+    evaluate_cached, M, N, ref_price_liter, ref_vol_own_sellin,
+    ref_vol_own_sellout, ref_vol_comp, remaining_abi_industry_volume,
+    target_pinc, tolerance, base_total_MACO
+):
+    """Create all constraint functions for the optimization."""
+    TOTAL_REF_INDUSTRY_VOLUME = (
+        ref_vol_own_sellout.sum() +
+        ref_vol_comp.sum() +
+        remaining_abi_industry_volume
+    )
+    NEW_INDUSTRY_VOLUME = (
+        (1 - 0.56 * target_pinc) * TOTAL_REF_INDUSTRY_VOLUME
+    )
+    TOTAL_REF_OWN_VOLUME = ref_vol_own_sellin.sum()
+    REF_MARKET_SHARE = (
+        (ref_vol_own_sellout.sum() + remaining_abi_industry_volume) /
+        TOTAL_REF_INDUSTRY_VOLUME
+    )
+    REF_AVG_PRICE_LITER = (
+        (ref_price_liter * ref_vol_own_sellin).sum() /
+        (ref_vol_own_sellin.sum() + 1e-12)
+    )
+
+    def industry_volume_pcc_constraint(P_opt):
+        """Ensure industry volume follows PCC model."""
+        evals = evaluate_cached(P_opt)
+        total_ind_opt = evals['total_industry_volume_opt']
+        pcc_volume = (
+            (1.0 - 0.56 * target_pinc) *
+            TOTAL_REF_INDUSTRY_VOLUME * 0.99
         )
-        self.total_ref_own_volume = np.sum(
-            reference_df['reference_volume'].values)
+        return total_ind_opt - pcc_volume
 
-        self.ref_market_share = (
-            np.sum(reference_df['sellout_volume'].values) /
-            self.total_ref_industry_volume
+    def fin_target_maco_constraint(P_opt):
+        """Ensure MACO does not decrease."""
+        evals = evaluate_cached(P_opt)
+        return evals['total_MACO'] - base_total_MACO
+
+    def own_volume_range(P_opt):
+        """Get own volume for range constraint."""
+        evals = evaluate_cached(P_opt)
+        return evals['total_own_volume_opt']
+
+    def volume_target_lower(P_opt):
+        """Ensure own volume does not decrease by more than 1%."""
+        evals = evaluate_cached(P_opt)
+        return evals['total_own_volume_opt'] - (TOTAL_REF_OWN_VOLUME * 0.99)
+
+    def volume_target_upper(P_opt):
+        """Ensure own volume does not increase by more than 5%."""
+        evals = evaluate_cached(P_opt)
+        return (TOTAL_REF_OWN_VOLUME * 1.05) - evals['total_own_volume_opt']
+
+    def pinc_constraint_target(P_opt):
+        """Get average optimized price for PINC constraint."""
+        evals = evaluate_cached(P_opt)
+        return evals['avg_opt_price']
+
+    def pinc_constraint_lower(P_opt):
+        """Ensure PINC is not below target."""
+        evals = evaluate_cached(P_opt)
+        return evals['portfolio_pct_price_change'] - (target_pinc + 0.003)
+
+    def pinc_constraint_upper(P_opt):
+        """Ensure PINC is not above target."""
+        evals = evaluate_cached(P_opt)
+        return target_pinc + 0.003 - evals['portfolio_pct_price_change']
+
+    def abi_share_constraint(P_opt):
+        """Ensure market share does not drop by more than 0.5%."""
+        evals = evaluate_cached(P_opt)
+        return evals['ms_opt'] - (REF_MARKET_SHARE - 0.005)
+
+    nl_industry_pcc = NonlinearConstraint(
+        industry_volume_pcc_constraint, 0.0, np.inf
+    )
+    nl_maco = NonlinearConstraint(
+        fin_target_maco_constraint, 0.0, np.inf
+    )
+    nl_vol = NonlinearConstraint(
+        own_volume_range,
+        0.99 * TOTAL_REF_OWN_VOLUME,
+        1.05 * TOTAL_REF_OWN_VOLUME
+    )
+    nl_vol_low = NonlinearConstraint(volume_target_lower, 0.0, np.inf)
+    nl_vol_up = NonlinearConstraint(volume_target_upper, 0.0, np.inf)
+    nl_pinc = NonlinearConstraint(
+        pinc_constraint_target,
+        ((1 + target_pinc) * REF_AVG_PRICE_LITER) - tolerance,
+        ((1 + target_pinc) * REF_AVG_PRICE_LITER) + tolerance
+    )
+    nl_pinc_low = NonlinearConstraint(pinc_constraint_lower, 0.0, np.inf)
+    nl_pinc_up = NonlinearConstraint(pinc_constraint_upper, 0.0, np.inf)
+    nl_ms = NonlinearConstraint(abi_share_constraint, 0.0, np.inf)
+
+    constraints = [
+        nl_industry_pcc, nl_maco, nl_vol_low,
+        nl_vol_up, nl_pinc_low, nl_pinc_up, nl_ms
+    ]
+    nl_constraints = [nl_industry_pcc, nl_maco, nl_vol, nl_pinc, nl_ms]
+    nl_constraints_v2 = [nl_industry_pcc, nl_maco, nl_vol, nl_ms]
+
+    return {
+        'constraints': constraints,
+        'nl_constraints': nl_constraints,
+        'nl_constraints_v2': nl_constraints_v2,
+        'TOTAL_REF_INDUSTRY_VOLUME': TOTAL_REF_INDUSTRY_VOLUME,
+        'NEW_INDUSTRY_VOLUME': NEW_INDUSTRY_VOLUME,
+        'TOTAL_REF_OWN_VOLUME': TOTAL_REF_OWN_VOLUME,
+        'REF_MARKET_SHARE': REF_MARKET_SHARE,
+        'REF_AVG_PRICE_LITER': REF_AVG_PRICE_LITER,
+        'base_total_MACO': base_total_MACO
+    }
+
+
+def constraint_violation_detail(res_x, constraints):
+    """Calculate detailed constraint violation information."""
+    details = []
+    for i, c in enumerate(constraints):
+        val = c.fun(res_x)
+        lb = c.lb if hasattr(c, 'lb') else c.bounds[0]
+        ub = c.ub if hasattr(c, 'ub') else c.bounds[1]
+        v_low = max(0.0, lb - val) if lb is not None else 0.0
+        v_high = max(0.0, val - ub) if ub is not None else 0.0
+        violation = max(v_low, v_high)
+        details.append((i, float(val), float(lb), float(ub),
+                       float(violation)))
+    return details
+
+
+def constraint_adherence(
+    P_opt_final, evaluate_uncached, base_total_MACO, TOTAL_REF_OWN_VOLUME,
+    TOTAL_REF_INDUSTRY_VOLUME, REF_MARKET_SHARE, target_pinc, tolerance,
+    segment_labels, size_labels, segment_order, size_order, M, N
+):
+    """Check and print constraint adherence for final solution."""
+    final_eval = evaluate_uncached(P_opt_final.reshape(-1))
+
+    print("MACO CONSTRAINT: ")
+    print("Base total MACO:", base_total_MACO)
+    print("Final total MACO:", final_eval['total_MACO'])
+    print("MACO Change:", (final_eval['total_MACO'] / base_total_MACO - 1))
+    if final_eval['total_MACO'] < base_total_MACO:
+        print("❌ MACO declined after optimization.")
+    else:
+        print("✅ MACO grew after optimization.")
+
+    print('\n')
+    print("OWN VOLUME CONSTRAINT: ")
+    print("Base total own volume:", TOTAL_REF_OWN_VOLUME)
+    print("Final total own volume:", final_eval['total_own_volume_opt'])
+    print("Own Volume Change:",
+          (final_eval['total_own_volume_opt'] / TOTAL_REF_OWN_VOLUME - 1))
+
+    lower_bound = 0.99 * TOTAL_REF_OWN_VOLUME
+    upper_bound = 1.05 * TOTAL_REF_OWN_VOLUME
+
+    if final_eval['total_own_volume_opt'] < lower_bound:
+        print("❌ Constraint violated: volume decreased by more than 1%.")
+    elif final_eval['total_own_volume_opt'] > upper_bound:
+        print("❌ Constraint violated: volume increased by more than 5%.")
+    else:
+        print("✅ Constraint satisfied: volume within bounds (±1% to +5%).")
+
+    print('\n')
+    print("INDUSTRY VOLUME CONSTRAINT: ")
+    print("Base industry volume:", TOTAL_REF_INDUSTRY_VOLUME)
+    print("Final industry volume:", final_eval['total_industry_volume_opt'])
+    vol_change = (
+        final_eval['total_industry_volume_opt'] /
+        TOTAL_REF_INDUSTRY_VOLUME - 1
+    )
+    print("Industry Volume Change:", vol_change)
+    lower_bound = 0.99 * (TOTAL_REF_INDUSTRY_VOLUME * (1 - 0.56*target_pinc))
+
+    if final_eval['total_industry_volume_opt'] < lower_bound:
+        print("❌ Constraint violated: industry volume decreased >1%.")
+    else:
+        print("✅ Constraint satisfied: industry volume within bounds.")
+
+    print('\n')
+    print("PINC CONSTRAINT: ")
+    print("Target PINC:", target_pinc)
+    print("Final PINC:", final_eval['portfolio_pct_price_change'])
+
+    if np.abs(final_eval['portfolio_pct_price_change'] - target_pinc
+              ) > tolerance:
+        print(f"❌ Constraint violated: PINC > {target_pinc}")
+    else:
+        print(f"✅ Constraint satisfied: PINC = {target_pinc}")
+
+    print('\n')
+    print("MARKET SHARE CONSTRAINT: ")
+    print("Base Market Share:", REF_MARKET_SHARE)
+    print("Final Market Share:", final_eval['ms_opt'])
+
+    bound = REF_MARKET_SHARE - 0.005
+
+    if final_eval['ms_opt'] < bound:
+        print("❌ Constraint violated: market share decreased by >0.5%.")
+    else:
+        print("✅ Constraint satisfied: market share within bounds.")
+
+    segment_means = {
+        seg: (
+            final_eval['NR_opt'][np.array(segment_labels) == seg].sum() /
+            final_eval['Q_own_opt'][np.array(segment_labels) == seg].sum()
         )
-        self.weighted_avg_ref_price = (
-            np.sum(reference_df['reference_volume'].values *
-                   reference_df['reference_price'].values) /
-            np.sum(reference_df['reference_volume'].values)
+        for seg in segment_order
+        if np.any(np.array(segment_labels) == seg)
+    }
+
+    size_means = {
+        s: (
+            final_eval['NR_opt'][np.array(size_labels) == s].sum() /
+            final_eval['Q_own_opt'][np.array(size_labels) == s].sum()
         )
+        for s in size_order
+        if np.any(np.array(size_labels) == s)
+    }
 
-    def industry_volume_constraint_monthly(
-            self,
-            P_opt_unit: np.ndarray
-            ) -> float:
-        """
-        Industry volume constraint - ensures total industry volume
-        doesn't decrease by more than threshold.
-        """
-        prices_by_month = P_opt_unit.reshape(self.num_months, self.num_own)
+    print("\n")
+    print("HIERARCHY CONSTRAINTS: ")
+    violated_segments = []
+    for i in range(len(segment_order) - 1):
+        curr_seg = segment_order[i]
+        next_seg = segment_order[i + 1]
+        if (next_seg in segment_means.keys() and
+                curr_seg in segment_means.keys()):
+            if segment_means[curr_seg] > segment_means[next_seg]:
+                violated_segments.append((curr_seg, next_seg))
 
-        total_industry_volume_opt = 0
+    if violated_segments:
+        print("❌ Segment NR/HL hierarchy violated between:")
+        for seg1, seg2 in violated_segments:
+            print(f"  {seg1} > {seg2}")
+    else:
+        print("✅ Segment NR/HL hierarchy is satisfied")
 
-        for i, month in enumerate(self.months):
-            (ref_vol_own, ref_vol_sellout, ref_price_own, capacity_own,
-             markup_own, discount_own, excise_own, vilc_own) = \
-                self.get_reference_arrays_own(
-                    month, self.reference_df, self.own_products
-                )
+    violated_sizes = []
+    for i in range(len(size_order) - 1):
+        curr_size = size_order[i]
+        next_size = size_order[i + 1]
+        if (next_size in size_means.keys() and
+                curr_size in size_means.keys()):
+            if size_means[curr_size] < size_means[next_size]:
+                violated_sizes.append((curr_size, next_size))
 
-            (ref_vol_comp, ref_price_comp) = \
-                self.get_reference_arrays_comp(
-                    month,
-                    self.competitor_reference_df,
-                    self.competitor_products
-                )
-
-            price_opt_own = prices_by_month[i, :]
-
-            vol_own_opt, vol_comp_opt, vol_own_opt_sellout = self.calc_volume(
-                price_opt_own, ref_vol_own, ref_vol_sellout, ref_vol_comp,
-                ref_price_own, capacity_own, self.E_price_to_volume,
-                self.E_price_to_comp_volume
-            )
-
-            industry_vol_opt = vol_own_opt_sellout.sum() + vol_comp_opt.sum()
-            total_industry_volume_opt += industry_vol_opt
-
-        return total_industry_volume_opt
-
-    def own_volume_constraint_monthly(self, P_opt_unit: np.ndarray) -> float:
-        """
-        ABI volume constraint - ensures own volume stays within bounds.
-        """
-        prices_by_month = P_opt_unit.reshape(self.num_months, self.num_own)
-
-        total_own_volume_opt = 0
-
-        for i, month in enumerate(self.months):
-            (ref_vol_own, ref_vol_sellout, ref_price_own, capacity_own,
-             markup_own, discount_own, excise_own, vilc_own) = \
-                self.get_reference_arrays_own(
-                    month, self.reference_df, self.own_products
-                )
-
-            (ref_vol_comp, ref_price_comp) = \
-                self.get_reference_arrays_comp(
-                    month,
-                    self.competitor_reference_df,
-                    self.competitor_products
-                )
-
-            price_opt_own = prices_by_month[i, :]
-
-            vol_own_opt, vol_comp_opt, vol_own_opt_sellout = self.calc_volume(
-                price_opt_own, ref_vol_own, ref_vol_sellout, ref_vol_comp,
-                ref_price_own, capacity_own, self.E_price_to_volume,
-                self.E_price_to_comp_volume
-            )
-
-            total_own_volume_opt += vol_own_opt.sum()
-
-        return total_own_volume_opt
-
-    def market_share_constraint_monthly(self, P_opt_unit: np.ndarray) -> float:
-        """
-        Market share constraint - ensures market share doesn't decrease
-        by more than threshold.
-        """
-        prices_by_month = P_opt_unit.reshape(self.num_months, self.num_own)
-
-        total_industry_volume_opt = 0
-        total_own_volume_opt = 0
-
-        for i, month in enumerate(self.months):
-            (ref_vol_own, ref_vol_sellout, ref_price_own, capacity_own,
-             markup_own, discount_own, excise_own, vilc_own) = \
-                self.get_reference_arrays_own(
-                    month, self.reference_df, self.own_products
-                )
-
-            (ref_vol_comp, ref_price_comp) = \
-                self.get_reference_arrays_comp(
-                    month, self.competitor_reference_df,
-                    self.competitor_products
-                )
-
-            price_opt_own = prices_by_month[i, :]
-
-            vol_own_opt, vol_comp_opt, vol_own_opt_sellout = self.calc_volume(
-                price_opt_own, ref_vol_own, ref_vol_sellout, ref_vol_comp,
-                ref_price_own, capacity_own, self.E_price_to_volume,
-                self.E_price_to_comp_volume
-            )
-
-            industry_vol_opt = vol_own_opt_sellout.sum() + vol_comp_opt.sum()
-            total_industry_volume_opt += industry_vol_opt
-            total_own_volume_opt += vol_own_opt_sellout.sum()
-
-        ms_opt = total_own_volume_opt / total_industry_volume_opt
-        return ms_opt
-
-    def portfolio_pinc_constraint_monthly(
-            self, P_opt_unit: np.ndarray
-            ) -> float:
-        """
-        Portfolio PINC constraint - ensures portfolio price increase
-        matches target.
-        """
-        prices_by_month = P_opt_unit.reshape(self.num_months, self.num_own)
-        total_own_volume_opt = 0
-        total_price_mult_vol_opt = 0
-
-        for i, month in enumerate(self.months):
-            (ref_vol_own, ref_vol_sellout, ref_price_own, capacity_own,
-             markup_own, discount_own, excise_own, vilc_own) = \
-                self.get_reference_arrays_own(
-                    month, self.reference_df, self.own_products
-                )
-
-            (ref_vol_comp, ref_price_comp) = \
-                self.get_reference_arrays_comp(
-                    month,
-                    self.competitor_reference_df,
-                    self.competitor_products
-                )
-
-            price_opt_own = prices_by_month[i, :]
-            price_opt_own_liter = price_opt_own * 100000 / capacity_own
-
-            vol_own_opt, vol_comp_opt, vol_own_opt_sellout = self.calc_volume(
-                price_opt_own, ref_vol_own, ref_vol_sellout, ref_vol_comp,
-                ref_price_own, capacity_own, self.E_price_to_volume,
-                self.E_price_to_comp_volume
-            )
-
-            price_mult_vol_opt = np.sum(price_opt_own_liter * vol_own_opt)
-            total_own_volume_opt += vol_own_opt.sum()
-            total_price_mult_vol_opt += price_mult_vol_opt
-
-        weighted_avg_opt_price = total_price_mult_vol_opt / (total_own_volume_opt * 100)
-        return weighted_avg_opt_price
-
-    def create_constraints(self, tolerance: float = 0.005) -> list:
-        """
-        Create all nonlinear constraints for the optimization.
-
-        Args:
-            tolerance: Tolerance for PINC constraint
-
-        Returns:
-            List of NonlinearConstraint objects
-        """
-        # Industry volume constraint
-        ind_vol_nlc_monthly = NonlinearConstraint(
-            self.industry_volume_constraint_monthly,
-            0.99 * (self.total_ref_industry_volume * (1 - 0.56 * self.target_delta)),
-            np.inf
-        )
-
-        # Own volume constraint
-        own_vol_nlc_monthly = NonlinearConstraint(
-            self.own_volume_constraint_monthly,
-            0.99 * self.total_ref_own_volume,
-            1.05 * self.total_ref_own_volume
-        )
-
-        # Market share constraint
-        market_share_nlc_monthly = NonlinearConstraint(
-            self.market_share_constraint_monthly,
-            self.ref_market_share - 0.005,
-            np.inf
-        )
-
-        # Portfolio PINC constraint
-        portfolio_pinc_nlc_monthly = NonlinearConstraint(
-            self.portfolio_pinc_constraint_monthly,
-            ((1 + self.target_delta) * self.weighted_avg_ref_price) - tolerance,
-            ((1 + self.target_delta) * self.weighted_avg_ref_price) + tolerance
-        )
-
-        return [
-            own_vol_nlc_monthly,
-            ind_vol_nlc_monthly,
-            market_share_nlc_monthly,
-            portfolio_pinc_nlc_monthly
-        ]
+    if violated_sizes:
+        print("❌ Size group NR/HL hierarchy violated between:")
+        for sg1, sg2 in violated_sizes:
+            print(f"  {sg1} < {sg2}")
+    else:
+        print("✅ Size group NR/HL hierarchy is satisfied")

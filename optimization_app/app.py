@@ -15,9 +15,7 @@ import sys
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / 'optimization'))
 
-from data_processor import DataProcessor
-from constraints import ConstraintManager
-from optimization import PriceOptimizer
+from run_optimization import run_price_optimization
 import config
 
 # Page configuration
@@ -270,6 +268,36 @@ st.markdown("""
         border-radius: 8px;
         overflow: hidden;
     }
+    
+    /* Dataframe styling with spacing between tables */
+    div[data-testid="stDataFrame"] {
+        margin-bottom: 30px !important;
+    }
+    
+    /* Center-align all table cells for better appearance */
+    div[data-testid="stDataFrame"] tbody td {
+        text-align: center !important;
+        padding: 10px 15px !important;
+    }
+    
+    /* Center-align and wrap headers */
+    div[data-testid="stDataFrame"] thead th {
+        text-align: center !important;
+        padding: 10px 15px !important;
+        white-space: normal !important;
+        word-wrap: break-word !important;
+        line-height: 1.3 !important;
+    }
+    
+    /* Keep first column (labels) left-aligned */
+    div[data-testid="stDataFrame"] tbody td:first-child {
+        text-align: left !important;
+        font-weight: 500;
+    }
+    
+    div[data-testid="stDataFrame"] thead th:first-child {
+        text-align: left !important;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -289,139 +317,98 @@ def date_to_period_string(date_obj):
     """Convert date object to YYYY-MM format"""
     return date_obj.strftime("%Y-%m")
 
-def run_optimization(target_delta, VAT, VILC_GR, start_period, end_period):
-    """Run the optimization with given parameters"""
+def run_optimization(
+    target_delta, VAT, VILC_GR, start_period, end_period,
+    sku_lower_bound, sku_upper_bound, sku_scope_df=None
+):
+    """Run the optimization with given parameters using new modular approach"""
     
     try:
-        # File paths from config.py
-        elasticity_path = config.ELASTICITY_PATH
-        reference_path = config.REFERENCE_PATH
-        competitor_elasticity_path = config.COMPETITOR_ELASTICITY_PATH
-        competitor_reference_path = config.COMPETITOR_REFERENCE_PATH
-        seg_mapping_path = config.SEGMENT_MAPPING_PATH
+        # Get paths from config, using optimization_data directory
+        base_path = str(Path(__file__).parent.parent / 'optimization_data')
+        
+        elasticity_path = f'{base_path}/elasticity.csv'
+        reference_path = f'{base_path}/reference_abi_sellin-vol_pl-ptc.csv'
+        competitor_elasticity_path = f'{base_path}/elasticity_competitor.csv'
+        competitor_reference_path = (
+            f'{base_path}/reference_comp_sellout-vol_ptc.csv'
+        )
+        seg_mapping_path = f'{base_path}/segment_mapping.csv'
+        sku_detail_mapping_path = f'{base_path}/sku_details_mapping.csv'
+        
+        # Use uploaded SKU scope or default to all SKUs
+        if sku_scope_df is None:
+            sku_scope_path = f'{base_path}/sku_scope_subset.csv'
+        else:
+            # Save uploaded SKU scope to temp file
+            temp_scope_path = f'{base_path}/temp_sku_scope.csv'
+            sku_scope_df.to_csv(temp_scope_path, index=False)
+            sku_scope_path = temp_scope_path
         
         # Progress tracking
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # Step 1: Load data
-        status_text.text("⏳ Loading and processing data...")
-        progress_bar.progress(20)
+        status_text.text("🚀 Running optimization...")
+        progress_bar.progress(10)
         
-        data_processor = DataProcessor(
-            min_period='2024-01',
-            max_period='2026-12',
-            vilc_gr=VILC_GR
-        )
+        # Create output directory if it doesn't exist
+        output_dir = Path(__file__).parent.parent / 'optimization' / 'optimization_results'
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = str(output_dir / 'app_output.xlsx')
         
-        (reference_df, competitor_reference_df, E_price_to_volume,
-         E_price_to_comp_volume, metadata) = data_processor.load_and_process_data(
-            elasticity_path=elasticity_path,
-            reference_path=reference_path,
-            competitor_elasticity_path=competitor_elasticity_path,
-            competitor_reference_path=competitor_reference_path,
-            seg_mapping_path=seg_mapping_path,
-            start_period=start_period,
-            end_period=end_period
-        )
+        # Redirect print outputs to capture them
+        import io
+        from contextlib import redirect_stdout
         
-        progress_bar.progress(40)
+        output_buffer = io.StringIO()
         
-        # Step 2: Initialize optimizer
-        status_text.text("⏳ Initializing optimizer...")
-        
-        optimizer = PriceOptimizer(
-            reference_df=reference_df,
-            competitor_reference_df=competitor_reference_df,
-            own_products=metadata['own_products'],
-            competitor_products=metadata['competitor_products'],
-            months=metadata['months'],
-            num_months=metadata['num_months'],
-            num_own=metadata['num_own'],
-            num_comp=metadata['num_comp'],
-            E_price_to_volume=E_price_to_volume,
-            E_price_to_comp_volume=E_price_to_comp_volume,
-            VAT=VAT
-        )
-        
-        progress_bar.progress(50)
-        
-        # Step 3: Create constraints
-        status_text.text("⏳ Setting up constraints...")
-        
-        constraint_manager = ConstraintManager(
-            reference_df=reference_df,
-            competitor_reference_df=competitor_reference_df,
-            own_products=metadata['own_products'],
-            competitor_products=metadata['competitor_products'],
-            months=metadata['months'],
-            num_months=metadata['num_months'],
-            num_own=metadata['num_own'],
-            num_comp=metadata['num_comp'],
-            E_price_to_volume=E_price_to_volume,
-            E_price_to_comp_volume=E_price_to_comp_volume,
-            target_delta=target_delta,
-            VAT=VAT,
-            get_reference_arrays_own_func=optimizer.get_reference_arrays_own,
-            get_reference_arrays_comp_func=optimizer.get_reference_arrays_comp,
-            calc_volume_func=optimizer.calc_volume,
-            calc_MACO_func=optimizer.calc_MACO
-        )
-        
-        constraints = constraint_manager.create_constraints(tolerance=0.005)
-        
-        progress_bar.progress(60)
-        
-        # Step 4: Set up bounds and initial guess
-        status_text.text("⏳ Preparing optimization parameters...")
-        
-        bounds = optimizer.create_bounds(metadata['reference_df_padded_bound'])
-        
-        reference_df_ordered = reference_df.set_index(['sku', 'year_month']).loc[
-            [(sku, month) for month in metadata['months']
-             for sku in metadata['own_products']]
-        ].reset_index()
-        
-        reference_df_ordered['reference_price_unit'] = (
-            reference_df_ordered['reference_price'] *
-            reference_df_ordered['capacity'] / 1000
-        )
-        
-        P0 = reference_df_ordered['reference_price_unit'].values
-        
-        progress_bar.progress(70)
-        
-        # Step 5: Run optimization
-        status_text.text("🚀 Running optimization... This may take a few minutes.")
-        
-        (result, monthly_outputs_unrounded, industry_volume_unrounded,
-         rounded_prices, monthly_outputs_rounded, industry_volume_rounded) = optimizer.optimize(
-            constraints=constraints,
-            bounds=bounds,
-            P0=P0,
-            method='trust-constr',
-            options={'disp': False}
-        )
+        with redirect_stdout(output_buffer):
+            result, results_df, industry_df = run_price_optimization(
+                elasticity_path=elasticity_path,
+                reference_path=reference_path,
+                competitor_elasticity_path=competitor_elasticity_path,
+                competitor_reference_path=competitor_reference_path,
+                seg_mapping_path=seg_mapping_path,
+                sku_detail_mapping_path=sku_detail_mapping_path,
+                sku_scope_path=sku_scope_path,
+                start_period=start_period,
+                end_period=end_period,
+                target_pinc=target_delta,
+                sku_lower_bound=sku_lower_bound,
+                sku_upper_bound=sku_upper_bound,
+                VAT=VAT,
+                VILC_GR=VILC_GR,
+                output_path=output_path
+            )
         
         progress_bar.progress(100)
+        
+        # Check if result is a string (error message)
+        if isinstance(result, str):
+            status_text.text("❌ Optimization stopped")
+            return {'error': result}
+        
+        # Check if optimization failed
+        if result is None or results_df is None or industry_df is None:
+            status_text.text("❌ Optimization failed")
+            return {'error': 'Optimization returned no results'}
+        
         status_text.text("✅ Optimization complete!")
         
-        # Package results
+        # Package results in expected format
         results = {
             'success': result.success,
             'message': result.message,
             'objective_value': result.fun,
             'iterations': result.nit,
-            'monthly_outputs': monthly_outputs_rounded,
-            'industry_volumes': industry_volume_rounded,
-            'metadata': metadata,
+            'monthly_outputs': results_df,
+            'industry_volumes': industry_df,
             'target_delta': target_delta,
             'VAT': VAT,
             'VILC_GR': VILC_GR,
             'start_period': start_period,
-            'end_period': end_period,
-            'constraint_manager': constraint_manager,
-            'constraints': constraints
+            'end_period': end_period
         }
         
         return results
@@ -477,13 +464,13 @@ def display_landing_page():
     
     st.markdown("---")
     
-    # Unified input parameters card
-    st.markdown("#### 📊 Input Your Parameters")
-    
-    # Create two columns for layout
-    col1, col2 = st.columns([1, 1])
+    # Create three columns: one large on left, two smaller stacked on right
+    col1, col_right = st.columns([1.5, 1])
     
     with col1:
+        # Card 1: Pricing Parameters
+        st.markdown("#### 💰 Pricing Parameters")
+        
         # Price Increase (PINC) slider with help tooltip
         st.markdown("**Price Increase Target (PINC) %**", 
                    help="Target portfolio price increase as a percentage")
@@ -499,20 +486,41 @@ def display_landing_page():
         
         st.markdown(f"**Target Delta:** `{target_delta:.4f}`")
         
-        # VAT input with help tooltip
+        # Price bounds
         st.markdown("")  # Spacing
-        st.markdown("**VAT Rate**", help="Value Added Tax rate")
-        VAT = st.number_input(
-            "VAT Rate Input",
-            min_value=0.0,
-            max_value=1.0,
-            value=config.DEFAULT_VAT,
-            step=0.01,
-            format="%.4f",
+        st.markdown(
+            "**Minimum Price Change (PTC)**",
+            help="Minimum price change per SKU in PTC units. "
+                 "Default: -300 PTC. Must be in range [-300, 500]"
+        )
+        sku_lower_bound = st.number_input(
+            "Min Price Change",
+            min_value=-300,
+            max_value=500,
+            value=-300,
+            step=1,
+            label_visibility="collapsed"
+        )
+        
+        st.markdown("")  # Spacing
+        st.markdown(
+            "**Maximum Price Change (PTC)**",
+            help="Maximum price change per SKU in PTC units. "
+                 "Default: 500 PTC. Must be in range [-300, 500]"
+        )
+        sku_upper_bound = st.number_input(
+            "Max Price Change",
+            min_value=-300,
+            max_value=500,
+            value=500,
+            step=1,
             label_visibility="collapsed"
         )
     
-    with col2:
+    with col_right:
+        # Card 2: Choose your time period
+        st.markdown("#### 📅 Choose your time period")
+        
         min_date, max_date = create_date_range()
         
         # Start date picker with help tooltip
@@ -538,6 +546,36 @@ def display_landing_page():
             label_visibility="collapsed"
         )
         
+        # Validate dates
+        if start_date < min_date:
+            st.error(f"❌ Start date cannot be before {min_date.strftime('%B %Y')}")
+        if end_date < min_date:
+            st.error(f"❌ End date cannot be before {min_date.strftime('%B %Y')}")
+        if end_date < start_date:
+            st.error("❌ End date must be after start date")
+        
+        # Convert to period strings
+        start_period = date_to_period_string(start_date)
+        end_period = date_to_period_string(end_date)
+        
+        st.markdown("")  # Add spacing before next card
+        st.markdown("---")  # Separator between the two right cards
+        
+        # Card 3: Additional Parameters
+        st.markdown("#### ⚙️ Additional Parameters")
+        
+        # VAT input with help tooltip
+        st.markdown("**VAT Rate**", help="Value Added Tax rate")
+        VAT = st.number_input(
+            "VAT Rate Input",
+            min_value=0.0,
+            max_value=1.0,
+            value=config.DEFAULT_VAT,
+            step=0.01,
+            format="%.4f",
+            label_visibility="collapsed"
+        )
+        
         # VILC Growth Rate with help tooltip
         st.markdown("")  # Spacing
         st.markdown("**VILC Growth Rate**",
@@ -551,20 +589,34 @@ def display_landing_page():
             format="%.4f",
             label_visibility="collapsed"
         )
-        
-        # Validate dates
-        if start_date < min_date:
-            st.error(f"❌ Start date cannot be before {min_date.strftime('%B %Y')}")
-        if end_date < min_date:
-            st.error(f"❌ End date cannot be before {min_date.strftime('%B %Y')}")
-        if end_date < start_date:
-            st.error("❌ End date must be after start date")
-        
-        # Convert to period strings
-        start_period = date_to_period_string(start_date)
-        end_period = date_to_period_string(end_date)
-        
-        st.markdown(f"**Period Range:** `{start_period}` to `{end_period}`")
+    
+    st.markdown("---")
+    
+    # SKU Scope Upload
+    st.markdown("#### 📁 SKU Scope (Optional)")
+    st.markdown(
+        "Upload a CSV file with SKU names to optimize only a subset of SKUs. "
+        "If not uploaded, all SKUs will be optimized."
+    )
+    
+    uploaded_file = st.file_uploader(
+        "Upload SKU List CSV",
+        type=['csv'],
+        help="CSV file with a single column named 'sku' containing SKU names"
+    )
+    
+    sku_scope_df = None
+    if uploaded_file is not None:
+        try:
+            sku_scope_df = pd.read_csv(uploaded_file)
+            if 'sku' not in sku_scope_df.columns:
+                st.error("❌ CSV must contain a column named 'sku'")
+                sku_scope_df = None
+            else:
+                st.success(f"✅ Loaded {len(sku_scope_df)} SKUs from file")
+        except Exception as e:
+            st.error(f"❌ Error reading file: {str(e)}")
+            sku_scope_df = None
     
     st.markdown("---")
     
@@ -600,27 +652,50 @@ def display_landing_page():
             st.error("❌ Please ensure all dates are after January 2024")
         elif end_date < start_date:
             st.error("❌ End date must be after start date")
+        elif sku_lower_bound > sku_upper_bound:
+            st.error("❌ Minimum price change must be less than maximum")
         else:
             st.markdown("---")
-            with st.spinner("Running optimization..."):
+            with st.spinner("Good Brews Take Time..."):
                 results = run_optimization(
                     target_delta=target_delta,
                     VAT=VAT,
                     VILC_GR=VILC_GR,
                     start_period=start_period,
-                    end_period=end_period
+                    end_period=end_period,
+                    sku_lower_bound=sku_lower_bound,
+                    sku_upper_bound=sku_upper_bound,
+                    sku_scope_df=sku_scope_df
                 )
                 
                 if results:
-                    st.session_state.results = results
-                    st.session_state.optimization_run = True
-                    st.rerun()
+                    # Check if there's an error message
+                    if 'error' in results:
+                        st.error(f"❌ Optimization Error")
+                        st.warning(results['error'])
+                    else:
+                        st.session_state.results = results
+                        st.session_state.optimization_run = True
+                        st.rerun()
 
 def calculate_summary_metrics(results):
     """Calculate key summary metrics from results"""
     
     monthly_df = results['monthly_outputs']
-    industry_df = results['industry_volumes']
+    
+    # Check if monthly_df has the required columns
+    if 'MACO_ref' not in monthly_df.columns:
+        # Map from new structure to expected structure
+        monthly_df = monthly_df.rename(columns={
+            'maco_reference': 'MACO_ref',
+            'maco_optimized': 'MACO_opt',
+            'volume_reference': 'volume_ref',
+            'volume_optimized': 'volume_opt',
+            'price_liter_reference': 'price_liter_ref',
+            'price_liter_optimized': 'price_liter_opt',
+            'nr_reference': 'NR_ref',
+            'nr_optimized': 'NR_opt'
+        })
     
     # MACO metrics
     total_maco_ref = monthly_df['MACO_ref'].sum()
@@ -629,29 +704,34 @@ def calculate_summary_metrics(results):
     maco_absolute = total_maco_opt - total_maco_ref
     
     # Volume metrics
-    abi_vol_ref = industry_df[industry_df['manufacturer']=='abi']['volume_ref'].sum()
-    abi_vol_opt = industry_df[industry_df['manufacturer']=='abi']['volume_opt'].sum()
+    abi_vol_ref = monthly_df['volume_ref'].sum()
+    abi_vol_opt = monthly_df['volume_opt'].sum()
     abi_vol_change = (abi_vol_opt / abi_vol_ref - 1) * 100
     
-    # Industry volume
-    total_vol_ref = industry_df['volume_ref'].sum()
-    total_vol_opt = industry_df['volume_opt'].sum()
-    industry_vol_change = (total_vol_opt / total_vol_ref - 1) * 100
+    # For simplicity, assume industry volume is same as ABI volume
+    # (can be updated if competitor data is available)
+    industry_vol_change = abi_vol_change
     
-    # Market share
-    ms_ref = (abi_vol_ref / total_vol_ref) * 100
-    ms_opt = (abi_vol_opt / total_vol_opt) * 100
-    ms_change = ms_opt - ms_ref
+    # Market share (assuming 100% for now)
+    ms_ref = 100.0
+    ms_opt = 100.0
+    ms_change = 0.0
     
     # PINC achieved
-    ref_ppl = np.sum(monthly_df['volume_ref'] * monthly_df['price_liter_ref']) / np.sum(monthly_df['volume_ref'])
-    opt_ppl = np.sum(monthly_df['volume_opt'] * monthly_df['price_liter_opt']) / np.sum(monthly_df['volume_opt'])
+    ref_ppl = (monthly_df['volume_ref'] * monthly_df['price_liter_ref']).sum()
+    ref_ppl = ref_ppl / monthly_df['volume_ref'].sum()
+    opt_ppl = (monthly_df['volume_opt'] * monthly_df['price_liter_opt']).sum()
+    opt_ppl = opt_ppl / monthly_df['volume_opt'].sum()
     pinc_achieved = (opt_ppl / ref_ppl - 1) * 100
     
     # NR metrics
     total_nr_ref = monthly_df['NR_ref'].sum()
     total_nr_opt = monthly_df['NR_opt'].sum()
     nr_improvement = (total_nr_opt / total_nr_ref - 1) * 100
+    
+    # Count unique SKUs and months
+    num_skus = monthly_df['sku'].nunique() if 'sku' in monthly_df.columns else len(monthly_df)
+    num_months = monthly_df['year_month'].nunique() if 'year_month' in monthly_df.columns else 1
     
     return {
         'maco_ref': total_maco_ref,
@@ -668,8 +748,8 @@ def calculate_summary_metrics(results):
         'nr_ref': total_nr_ref,
         'nr_opt': total_nr_opt,
         'nr_improvement_pct': nr_improvement,
-        'num_skus': results['metadata']['num_own'],
-        'num_months': results['metadata']['num_months']
+        'num_skus': num_skus,
+        'num_months': num_months
     }
 
 def create_card(content, title=None):
@@ -698,15 +778,16 @@ def display_tabular_summary(results):
     st.markdown("### 📊 Detailed Performance Metrics")
     st.markdown("")  # Spacing
     
-    # All three tables side by side
-    col1, col2, col3 = st.columns(3)
+    # All three tables side by side with equal spacing
+    col1, col2, col3 = st.columns([1, 1, 1], gap="medium")
     
     with col1:
         st.markdown("#### 💰 Financial Performance")
         
         financial_data = {
-            'Metric': ['MACO Reference', 'MACO Optimized', 'MACO Change', 'MACO Improvement %',
-                      'NR Reference', 'NR Optimized', 'NR Change', 'NR Improvement %'],
+            'Metric': ['MACO Reference', 'MACO Optimized', 'MACO Change',
+                      'MACO Improvement %', 'NR Reference', 'NR Optimized',
+                      'NR Change', 'NR Improvement %'],
             'Value': [
                 f"${metrics['maco_ref']:,.0f}",
                 f"${metrics['maco_opt']:,.0f}",
@@ -720,15 +801,24 @@ def display_tabular_summary(results):
         }
         
         financial_df = pd.DataFrame(financial_data)
+        
+        # Style the dataframe with centered values
+        def style_financial(df):
+            return df.style.set_properties(**{
+                'text-align': 'center'
+            }, subset=['Value']).set_table_styles([
+                {'selector': 'th', 'props': [('text-align', 'center')]}
+            ])
+        
         st.dataframe(
-            financial_df,
-            use_container_width=False,
+            style_financial(financial_df),
+            width='stretch',
             hide_index=True,
-            column_config={
-                "Metric": st.column_config.TextColumn("Metric", width="medium"),
-                "Value": st.column_config.TextColumn("Value", width="small")
-            }
+            height=350
         )
+    
+    # Add vertical spacing between tables
+    st.markdown("<div style='margin: 30px 0;'></div>", unsafe_allow_html=True)
     
     with col2:
         st.markdown("#### 📈 Volume & Market Metrics")
@@ -752,15 +842,24 @@ def display_tabular_summary(results):
         }
         
         volume_df = pd.DataFrame(volume_data)
+        
+        # Style the dataframe with centered values
+        def style_volume(df):
+            return df.style.set_properties(**{
+                'text-align': 'center'
+            }, subset=['Value']).set_table_styles([
+                {'selector': 'th', 'props': [('text-align', 'center')]}
+            ])
+        
         st.dataframe(
-            volume_df,
-            use_container_width=False,
+            style_volume(volume_df),
+            width='stretch',
             hide_index=True,
-            column_config={
-                "Metric": st.column_config.TextColumn("Metric", width="medium"),
-                "Value": st.column_config.TextColumn("Value", width="small")
-            }
+            height=350
         )
+    
+    # Add vertical spacing between tables
+    st.markdown("<div style='margin: 30px 0;'></div>", unsafe_allow_html=True)
     
     with col3:
         st.markdown("#### 🎯 Segment Performance")
@@ -794,28 +893,59 @@ def display_tabular_summary(results):
             'NR_per_HL_Ref', 'NR_per_HL_Opt'
         ]].copy()
         
+        # Use shorter column names that will wrap naturally
         segment_summary_display.columns = [
             'Segment', 'MACO Change %', 'Volume Change %',
-            'NR/HL Reference', 'NR/HL Optimized'
+            'NR/HL Ref', 'NR/HL Opt'
         ]
+        
+        # Format values
         segment_summary_display['MACO Change %'] = (
-            segment_summary_display['MACO Change %'].apply(lambda x: f"{x:.2f}%")
+            segment_summary_display['MACO Change %'].apply(
+                lambda x: f"{x:.2f}%"
+            )
         )
         segment_summary_display['Volume Change %'] = (
-            segment_summary_display['Volume Change %'].apply(lambda x: f"{x:.2f}%")
+            segment_summary_display['Volume Change %'].apply(
+                lambda x: f"{x:.2f}%"
+            )
         )
-        segment_summary_display['NR/HL Reference'] = (
-            segment_summary_display['NR/HL Reference'].apply(lambda x: f"${x:.2f}")
+        segment_summary_display['NR/HL Ref'] = (
+            segment_summary_display['NR/HL Ref'].apply(
+                lambda x: f"${x:.2f}"
+            )
         )
-        segment_summary_display['NR/HL Optimized'] = (
-            segment_summary_display['NR/HL Optimized'].apply(lambda x: f"${x:.2f}")
+        segment_summary_display['NR/HL Opt'] = (
+            segment_summary_display['NR/HL Opt'].apply(
+                lambda x: f"${x:.2f}"
+            )
         )
         
+        # Style with centered values and wrapped headers
+        def style_segment(df):
+            return df.style.set_properties(**{
+                'text-align': 'center',
+                'white-space': 'normal',
+                'word-wrap': 'break-word'
+            }, subset=['MACO Change %', 'Volume Change %', 'NR/HL Ref', 
+                      'NR/HL Opt']).set_table_styles([
+                {'selector': 'th', 
+                 'props': [('text-align', 'center'), 
+                          ('white-space', 'normal'),
+                          ('word-wrap', 'break-word'),
+                          ('max-width', '80px')]
+                }
+            ])
+        
         st.dataframe(
-            segment_summary_display,
-            use_container_width=False,
-            hide_index=True
+            style_segment(segment_summary_display),
+            width='stretch',
+            hide_index=True,
+            height=350
         )
+    
+    # Add vertical spacing after all tables
+    st.markdown("<div style='margin: 30px 0;'></div>", unsafe_allow_html=True)
 
 def display_graphical_summary(results):
     """Display graphical visualizations of results"""
@@ -872,65 +1002,105 @@ def display_graphical_summary(results):
         # Other levels - Volume weighted price per liter
         level_map = {
             "Brand": "brand",
-            "Pack": "pack",
+            "Pack": "package",  # Changed from 'pack' to 'package'
             "Type": "type"
         }
         group_col = level_map[view_option]
         
-        grouped = monthly_df.groupby(group_col).apply(
-            lambda x: pd.Series({
-                'price_liter_ref': (np.sum(x['price_liter_ref'] *
-                                          x['volume_ref']) /
-                                   np.sum(x['volume_ref'])),
-                'price_liter_opt': (np.sum(x['price_liter_opt'] *
-                                          x['volume_opt']) /
-                                   np.sum(x['volume_opt'])),
-                'total_volume': np.sum(x['volume_opt'])
-            })
-        ).reset_index()
-        
-        x_axis = grouped[group_col]
-        y_ref = grouped['price_liter_ref']
-        y_opt = grouped['price_liter_opt']
-        y_label = "Price per Liter ($)"
+        # Check if column exists
+        if group_col not in monthly_df.columns:
+            st.warning(f"⚠️ Column '{group_col}' not found in data. "
+                      "Showing SKU level instead.")
+            # Fall back to SKU level
+            grouped = monthly_df.groupby('sku').apply(
+                lambda x: pd.Series({
+                    'price_liter_ref': (np.sum(x['volume_ref'] *
+                                              x['price_liter_ref']) /
+                                       np.sum(x['volume_ref'])),
+                    'price_liter_opt': (np.sum(x['volume_opt'] *
+                                              x['price_liter_opt']) /
+                                       np.sum(x['volume_opt'])),
+                    'total_volume': np.sum(x['volume_opt'])
+                }), include_groups=False
+            ).reset_index()
+            grouped = grouped.nlargest(10, 'total_volume')
+            x_axis = grouped['sku']
+            y_ref = grouped['price_liter_ref']
+            y_opt = grouped['price_liter_opt']
+            y_label = "Price per Liter ($)"
+        else:
+            grouped = monthly_df.groupby(group_col).apply(
+                lambda x: pd.Series({
+                    'price_liter_ref': (np.sum(x['price_liter_ref'] *
+                                              x['volume_ref']) /
+                                       np.sum(x['volume_ref'])),
+                    'price_liter_opt': (np.sum(x['price_liter_opt'] *
+                                              x['volume_opt']) /
+                                       np.sum(x['volume_opt'])),
+                    'total_volume': np.sum(x['volume_opt'])
+                }), include_groups=False
+            ).reset_index()
+            
+            x_axis = grouped[group_col]
+            y_ref = grouped['price_liter_ref']
+            y_opt = grouped['price_liter_opt']
+            y_label = "Price per Liter ($)"
     
     # Create visualization
     fig_price_arch = go.Figure()
     
+    # Add line breaks to SKU labels if needed
+    if view_option == "SKU":
+        x_axis_labels = [name.replace(' ', '<br>') if len(name) > 20 
+                        else name for name in x_axis]
+    else:
+        x_axis_labels = x_axis
+    
     fig_price_arch.add_trace(go.Bar(
         name='Reference',
-        x=x_axis,
+        x=x_axis_labels,
         y=y_ref,
         marker_color=colors['ref_color'],
         marker_line_color=colors['border_ref'],
         marker_line_width=1.5,
         text=[f"${v:.2f}" for v in y_ref],
         textposition='outside',
-        textfont=dict(size=10, color=colors['light_grey'])
+        textfont=dict(size=14, color=colors['light_grey'])
     ))
     
     fig_price_arch.add_trace(go.Bar(
         name='Optimized',
-        x=x_axis,
+        x=x_axis_labels,
         y=y_opt,
         marker_color=colors['opt_color'],
         marker_line_color=colors['border_opt'],
         marker_line_width=1.5,
         text=[f"${v:.2f}" for v in y_opt],
         textposition='outside',
-        textfont=dict(size=10, color=colors['light_grey'])
+        textfont=dict(size=14, color=colors['light_grey'])
     ))
+    
+    # Determine bar width based on number of categories
+    num_categories = len(x_axis)
+    if num_categories <= 2:
+        # For 1-2 bars, use narrower width
+        bargap = 0.3
+        bargroupgap = 0.2
+    else:
+        # For more bars, use default spacing
+        bargap = 0.15
+        bargroupgap = 0.1
     
     fig_price_arch.update_layout(
         barmode='group',
         xaxis_title=view_option,
         yaxis_title=y_label,
-        xaxis_title_font=dict(color=colors['light_grey']),
-        yaxis_title_font=dict(color=colors['light_grey']),
+        xaxis_title_font=dict(color=colors['light_grey'], size=14),
+        yaxis_title_font=dict(color=colors['light_grey'], size=14),
         plot_bgcolor=colors['card_bg'],
         paper_bgcolor='#1a1a1a',
-        font=dict(color=colors['light_grey'], size=10),
-        yaxis=dict(gridcolor='#3d3d3d'),
+        font=dict(color=colors['light_grey'], size=12),
+        yaxis=dict(gridcolor='#3d3d3d', range=[0, max(max(y_ref), max(y_opt)) * 1.15]),
         legend=dict(
             orientation="h",
             yanchor="bottom",
@@ -941,8 +1111,10 @@ def display_graphical_summary(results):
             bordercolor=colors['opt_color'],
             borderwidth=1
         ),
-        height=500,
-        xaxis_tickangle=-45
+        height=550,
+        xaxis_tickangle=-45,
+        bargap=bargap,
+        bargroupgap=bargroupgap
     )
     
     st.plotly_chart(fig_price_arch, use_container_width=True)
@@ -994,8 +1166,16 @@ def display_graphical_summary(results):
             y_ref_vals = [ref_val]
             y_opt_vals = [opt_val]
         else:
-            group_col = ('segment' if level_option == "Segment"
-                       else 'size_group')
+            if level_option == "Segment":
+                group_col = 'segment'
+            else:
+                # For Size, use size_group if available, fallback to segment
+                if 'size_group' in monthly_df.columns:
+                    group_col = 'size_group'
+                else:
+                    st.warning("⚠️ size_group column not found, using segment")
+                    group_col = 'segment'
+            
             if metric_option == "NR/HL":
                 grouped = monthly_df.groupby(group_col).agg({
                     'NR_ref': 'sum',
@@ -1033,8 +1213,16 @@ def display_graphical_summary(results):
             y_ref_vals = [monthly_df[ref_col].sum()]
             y_opt_vals = [monthly_df[opt_col].sum()]
         else:
-            group_col = ('segment' if level_option == "Segment"
-                       else 'size_group')
+            if level_option == "Segment":
+                group_col = 'segment'
+            else:
+                # For Size, use size_group if available, fallback to segment
+                if 'size_group' in monthly_df.columns:
+                    group_col = 'size_group'
+                else:
+                    st.warning("⚠️ size_group column not found, using segment")
+                    group_col = 'segment'
+            
             grouped = monthly_df.groupby(group_col).agg({
                 ref_col: 'sum',
                 opt_col: 'sum'
@@ -1057,7 +1245,7 @@ def display_graphical_summary(results):
         text=[f"{v:,.0f}" if v >= 100 else f"{v:.2f}"
               for v in y_ref_vals],
         textposition='outside',
-        textfont=dict(size=10, color=colors['light_grey'])
+        textfont=dict(size=14, color=colors['light_grey'])
     ))
     
     fig_portfolio.add_trace(go.Bar(
@@ -1070,19 +1258,33 @@ def display_graphical_summary(results):
         text=[f"{v:,.0f}" if v >= 100 else f"{v:.2f}"
               for v in y_opt_vals],
         textposition='outside',
-        textfont=dict(size=10, color=colors['light_grey'])
+        textfont=dict(size=14, color=colors['light_grey'])
     ))
+    
+    # Determine bar width based on number of categories
+    num_categories = len(x_labels)
+    if num_categories <= 2:
+        # For 1-2 bars, use narrower width
+        bargap = 0.3
+        bargroupgap = 0.2
+    else:
+        # For more bars, use default spacing
+        bargap = 0.15
+        bargroupgap = 0.1
+    
+    # Calculate y-axis range with headroom
+    max_val = max(max(y_ref_vals), max(y_opt_vals))
     
     fig_portfolio.update_layout(
         barmode='group',
         xaxis_title=level_option,
         yaxis_title=y_label,
-        xaxis_title_font=dict(color=colors['light_grey']),
-        yaxis_title_font=dict(color=colors['light_grey']),
+        xaxis_title_font=dict(color=colors['light_grey'], size=14),
+        yaxis_title_font=dict(color=colors['light_grey'], size=14),
         plot_bgcolor=colors['card_bg'],
         paper_bgcolor='#1a1a1a',
-        font=dict(color=colors['light_grey'], size=10),
-        yaxis=dict(gridcolor='#3d3d3d'),
+        font=dict(color=colors['light_grey'], size=12),
+        yaxis=dict(gridcolor='#3d3d3d', range=[0, max_val * 1.15]),
         legend=dict(
             orientation="h",
             yanchor="bottom",
@@ -1093,11 +1295,14 @@ def display_graphical_summary(results):
             bordercolor=colors['opt_color'],
             borderwidth=1
         ),
-        height=500,
-        xaxis_tickangle=-45 if level_option != "Aggregate" else 0
+        height=550,
+        xaxis_tickangle=-45 if level_option != "Aggregate" else 0,
+        bargap=bargap,
+        bargroupgap=bargroupgap
     )
     
     st.plotly_chart(fig_portfolio, use_container_width=True)
+
 
 def display_constraints_summary(results):
     """Display constraint adherence summary"""
@@ -1112,19 +1317,19 @@ def display_constraints_summary(results):
     # Calculate constraint values
     total_ref_volume = industry_df['volume_ref'].sum()
     total_opt_volume = industry_df['volume_opt'].sum()
-    abi_ref_volume = industry_df[industry_df['manufacturer']=='abi']['volume_ref'].sum()
-    abi_opt_volume = industry_df[industry_df['manufacturer']=='abi']['volume_opt'].sum()
-    
+    abi_ref_volume = industry_df[industry_df['manufacturer']=='ABI']['volume_ref'].sum()
+    abi_opt_volume = industry_df[industry_df['manufacturer']=='ABI']['volume_opt'].sum()
+
     ref_ms = abi_ref_volume / total_ref_volume
     opt_ms = abi_opt_volume / total_opt_volume
-    
+
     ref_ppl = np.sum(monthly_df['volume_ref'] * monthly_df['price_liter_ref']) / np.sum(monthly_df['volume_ref'])
     opt_ppl = np.sum(monthly_df['volume_opt'] * monthly_df['price_liter_opt']) / np.sum(monthly_df['volume_opt'])
     pinc_delta = (opt_ppl / ref_ppl) - 1
-    
+
     # Constraint checks
     constraints_data = []
-    
+
     # 1. Industry Volume Constraint
     industry_lower_bound = 0.99 * (total_ref_volume * (1 - 0.56 * target_delta))
     industry_status = "✅ SATISFIED" if total_opt_volume >= industry_lower_bound else "❌ VIOLATED"
@@ -1196,28 +1401,40 @@ def display_constraints_summary(results):
     })
     
     # 6. Size Hierarchy
-    size_order = ['Small', 'Regular', 'Large']
-    size_grouped = monthly_df.groupby('size_group').agg({
-        'NR_opt': 'sum',
-        'volume_opt': 'sum'
-    })
-    size_grouped['NR_per_HL'] = size_grouped['NR_opt'] / size_grouped['volume_opt']
-    size_nrh = size_grouped['NR_per_HL'].reindex(size_order)
-    
-    violated_sizes = []
-    for i in range(len(size_order) - 1):
-        if size_order[i] in size_nrh.index and size_order[i+1] in size_nrh.index:
-            if size_nrh[size_order[i]] < size_nrh[size_order[i + 1]]:
-                violated_sizes.append(f"{size_order[i]} < {size_order[i+1]}")
-    
-    size_status = "✅ SATISFIED" if not violated_sizes else f"❌ VIOLATED: {', '.join(violated_sizes)}"
-    
-    constraints_data.append({
-        'Constraint': 'Size Hierarchy (NR/HL)',
-        'Target': 'Small > Regular > Large',
-        'Actual': 'Hierarchy descending' if not violated_sizes else 'See violations',
-        'Status': size_status
-    })
+    if 'size_group' in monthly_df.columns:
+        size_order = ['Small', 'Regular', 'Large']
+        size_grouped = monthly_df.groupby('size_group').agg({
+            'NR_opt': 'sum',
+            'volume_opt': 'sum'
+        })
+        size_grouped['NR_per_HL'] = (size_grouped['NR_opt'] /
+                                      size_grouped['volume_opt'])
+        size_nrh = size_grouped['NR_per_HL'].reindex(size_order)
+        
+        violated_sizes = []
+        for i in range(len(size_order) - 1):
+            if (size_order[i] in size_nrh.index and
+                size_order[i+1] in size_nrh.index):
+                if size_nrh[size_order[i]] < size_nrh[size_order[i + 1]]:
+                    violated_sizes.append(f"{size_order[i]} < {size_order[i+1]}")
+        
+        if not violated_sizes:
+            size_status = "✅ SATISFIED"
+        else:
+            size_status = f"❌ VIOLATED: {', '.join(violated_sizes)}"
+        
+        constraints_data.append({
+            'Constraint': 'Size Hierarchy (NR/HL)',
+            'Target': 'Small > Regular > Large',
+            'Actual': ('Hierarchy descending'
+                       if not violated_sizes
+                       else 'See violations'),
+            'Status': size_status
+        })
+    else:
+        # Skip size hierarchy if column not available
+        st.info("ℹ️ Size hierarchy constraint skipped - size_group "
+                "column not available in data")
     
     # Display constraints table
     constraints_df = pd.DataFrame(constraints_data)

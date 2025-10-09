@@ -1,202 +1,266 @@
-"""
-Example script showing how to use the optimization modules programmatically.
-This can be used as a standalone script or imported into other projects.
-"""
+"""Script to run price optimization using modular components."""
 
-import numpy as np
-from pathlib import Path
+import pandas as pd
 
-from data_processor import DataProcessor
-from constraints import ConstraintManager
-from optimization import PriceOptimizer
-from utils import create_summary_report, export_results
+from data_processor import (
+    load_and_filter_with_scope,
+    create_elasticity_matrix,
+    create_reference_arrays,
+    create_bounds,
+    create_segment_size_labels
+)
+from optimization import (
+    create_evaluation_functions,
+    create_objective_function,
+    run_optimization,
+    create_results_dataframe
+)
+from constraints import (
+    create_constraint_functions,
+    constraint_violation_detail,
+    constraint_adherence,
+    round_to_nearest_50
+)
 
 
-def run_optimization(
-    elasticity_path: str,
-    reference_path: str,
-    competitor_elasticity_path: str,
-    competitor_reference_path: str,
-    seg_mapping_path: str,
-    start_period: str = '2025-08',
-    end_period: str = '2025-10',
-    target_delta: float = 0.06,
-    VAT: float = 0.19,
-    VILC_GR: float = 0.0378,
-    tolerance: float = 0.005,
-    output_dir: str = 'optimization_results'
+def run_price_optimization(
+    elasticity_path, reference_path, competitor_elasticity_path,
+    competitor_reference_path, seg_mapping_path, sku_detail_mapping_path,
+    sku_scope_path, start_period='2025-07', end_period='2025-08',
+    target_pinc=0.06, sku_lower_bound=-300, sku_upper_bound=500,
+    VAT=0.19, VILC_GR=0.0378, seg_lambda=1e4, size_lambda=1e4,
+    penalty_per_violation=1e3, tolerance=0.01,
+    output_path='optimization_results/optimization_output.xlsx'
 ):
-    """
-    Run complete optimization workflow.
-
-    Args:
-        elasticity_path: Path to own-to-own elasticity CSV
-        reference_path: Path to reference data CSV
-        competitor_elasticity_path: Path to competitor elasticity CSV
-        competitor_reference_path: Path to competitor reference CSV
-        seg_mapping_path: Path to segment mapping CSV
-        start_period: Optimization start period (YYYY-MM)
-        end_period: Optimization end period (YYYY-MM)
-        target_delta: Target portfolio PINC
-        VAT: VAT rate
-        VILC_GR: VILC growth rate
-        n_jobs: Number of parallel jobs (-1 for all cores)
-        tolerance: PINC constraint tolerance
-        output_dir: Directory for output files
-
-    Returns:
-        Tuple of (result, monthly_df, industry_df, summary_df)
-    """
-    print("="*60)
+    """Run complete optimization workflow."""
+    print("=" * 60)
     print("PRICE OPTIMIZATION")
-    print("="*60)
+    print("=" * 60)
 
-    # Step 1: Data Processing
-    print("\n1. Loading and processing data...")
-    data_processor = DataProcessor(
-        min_period='2024-01',
-        max_period='2026-12',
-        vilc_gr=VILC_GR
+    segment_order = ["Value", "Core", "Core+", "Premium", "Super Premium"]
+    size_order = ["Small", "Regular", "Large"]
+
+    print("\n1. Loading data...")
+    sku_scope = pd.read_csv(sku_scope_path)
+    own_to_own_elasticity_df = pd.read_csv(elasticity_path)
+    reference_df = pd.read_csv(reference_path)
+    own_to_competitor_elasticity_df = pd.read_csv(
+        competitor_elasticity_path)
+    competitor_reference_df = pd.read_csv(competitor_reference_path)
+    seg_mapping = pd.read_csv(seg_mapping_path)
+    sku_detail_mapping = pd.read_csv(sku_detail_mapping_path)
+
+    valid_periods = reference_df['year_month'].unique()
+    print(f"   Loaded data with {len(valid_periods)} periods")
+
+    print("\n2. Preprocessing and filtering data...")
+    (
+        reference_df, remaining_abi_industry_volume,
+        competitor_reference_df, own_to_own_elasticity_df,
+        own_to_competitor_elasticity_df, reference_df_padded_bound,
+        reference_df_other
+    ) = load_and_filter_with_scope(
+        reference_df, sku_scope, VILC_GR,
+        own_to_own_elasticity_df, own_to_competitor_elasticity_df,
+        competitor_reference_df, seg_mapping, start_period, end_period,
+        valid_periods
     )
 
-    (reference_df, competitor_reference_df, E_price_to_volume,
-     E_price_to_comp_volume, metadata) = data_processor.load_and_process_data(
-        elasticity_path=elasticity_path,
-        reference_path=reference_path,
-        competitor_elasticity_path=competitor_elasticity_path,
-        competitor_reference_path=competitor_reference_path,
-        seg_mapping_path=seg_mapping_path,
-        start_period=start_period,
-        end_period=end_period
+    print(f"   Remaining ABI volume: {remaining_abi_industry_volume:,.0f}")
+    n_skus = len(reference_df['sku'].unique())
+    n_months = len(reference_df['year_month'].unique())
+    print(f"   Processing {n_skus} SKUs over {n_months} months")
+
+    print("\n3. Creating elasticity matrices...")
+    (
+        own_products, competitor_products, months, num_months, num_own,
+        num_comp, E_price_to_volume, E_price_to_comp_volume
+    ) = create_elasticity_matrix(
+        own_to_own_elasticity_df, reference_df,
+        own_to_competitor_elasticity_df, competitor_reference_df
+    )
+    print(f"   Own: {num_own}, Competitor: {num_comp}, Months: {num_months}")
+
+    print("\n4. Creating reference arrays...")
+    ref_arrays = create_reference_arrays(
+        reference_df, competitor_reference_df,
+        months, own_products, competitor_products
     )
 
-    print(f"   ✓ Loaded {metadata['num_own']} own products")
-    print(f"   ✓ Loaded {metadata['num_comp']} competitor products")
-    print(f"   ✓ Processing {metadata['num_months']} months")
+    M, N, K = ref_arrays['M'], ref_arrays['N'], ref_arrays['K']
+    ref_price_liter = ref_arrays['ref_price_liter']
+    ref_price_unit = ref_arrays['ref_price_unit']
+    ref_vol_own_sellin = ref_arrays['ref_vol_own_sellin']
+    ref_vol_own_sellout = ref_arrays['ref_vol_own_sellout']
+    capacity = ref_arrays['capacity']
+    markup = ref_arrays['markup']
+    discount = ref_arrays['discount']
+    excise = ref_arrays['excise']
+    vilc = ref_arrays['vilc']
+    ref_vol_comp = ref_arrays['ref_vol_comp']
+    print(f"   Arrays created: M={M}, N={N}, K={K}")
 
-    # Step 2: Initialize Optimizer
-    print("\n2. Initializing optimizer...")
-    optimizer = PriceOptimizer(
-        reference_df=reference_df,
-        competitor_reference_df=competitor_reference_df,
-        own_products=metadata['own_products'],
-        competitor_products=metadata['competitor_products'],
-        months=metadata['months'],
-        num_months=metadata['num_months'],
-        num_own=metadata['num_own'],
-        num_comp=metadata['num_comp'],
-        E_price_to_volume=E_price_to_volume,
-        E_price_to_comp_volume=E_price_to_comp_volume,
-        VAT=VAT,
+    print("\n5. Creating evaluation functions with caching...")
+    (
+        evaluate_uncached, evaluate_cached, clear_eval_cache,
+        base_total_MACO, NR_ref, MACO_ref
+    ) = create_evaluation_functions(
+        M, N, K, E_price_to_volume, E_price_to_comp_volume,
+        ref_price_liter, ref_price_unit, ref_vol_own_sellin,
+        ref_vol_own_sellout, ref_vol_comp, capacity,
+        markup, discount, excise, vilc, VAT,
+        remaining_abi_industry_volume
     )
-    print(f"   ✓ Optimizer ready!")
+    print(f"   Baseline MACO: {base_total_MACO:,.2f}")
 
-    # Step 3: Create Constraints
-    print("\n3. Setting up constraints...")
-    constraint_manager = ConstraintManager(
-        reference_df=reference_df,
-        competitor_reference_df=competitor_reference_df,
-        own_products=metadata['own_products'],
-        competitor_products=metadata['competitor_products'],
-        months=metadata['months'],
-        num_months=metadata['num_months'],
-        num_own=metadata['num_own'],
-        num_comp=metadata['num_comp'],
-        E_price_to_volume=E_price_to_volume,
-        E_price_to_comp_volume=E_price_to_comp_volume,
-        target_delta=target_delta,
-        VAT=VAT,
-        get_reference_arrays_own_func=optimizer.get_reference_arrays_own,
-        get_reference_arrays_comp_func=optimizer.get_reference_arrays_comp,
-        calc_volume_func=optimizer.calc_volume,
-        calc_MACO_func=optimizer.calc_MACO
+    print("\n6. Creating segment and size labels...")
+    segment_labels, size_labels = create_segment_size_labels(
+        reference_df, M, N
     )
+    print(f"   Labels created: {segment_labels.shape}")
 
-    constraints = constraint_manager.create_constraints(tolerance=tolerance)
-    print(f"   ✓ Created {len(constraints)} constraints")
+    print("\n7. Creating objective function...")
+    objective = create_objective_function(
+        evaluate_cached, segment_labels, size_labels,
+        segment_order, size_order, seg_lambda, size_lambda,
+        penalty_per_violation
+    )
+    print("   Objective function created")
 
-    # Step 4: Setup Bounds and Initial Guess
-    print("\n4. Preparing optimization parameters...")
-    bounds = optimizer.create_bounds(metadata['reference_df_padded_bound'])
-
-    reference_df_ordered = reference_df.set_index(['sku', 'year_month']).loc[
-        [(sku, month) for month in metadata['months']
-         for sku in metadata['own_products']]
-    ].reset_index()
-
-    reference_df_ordered['reference_price_unit'] = (
-        reference_df_ordered['reference_price'] *
-        reference_df_ordered['capacity'] / 1000
+    print("\n8. Creating constraints...")
+    constraint_dict = create_constraint_functions(
+        evaluate_cached, M, N, ref_price_liter, ref_vol_own_sellin,
+        ref_vol_own_sellout, ref_vol_comp, remaining_abi_industry_volume,
+        target_pinc, tolerance, base_total_MACO
     )
 
-    P0 = reference_df_ordered['reference_price_unit'].values
-    print(f"   ✓ Created bounds for {len(bounds)} variables")
-    print(f"   ✓ Initial guess shape: {P0.shape}")
+    nl_constraints = constraint_dict['nl_constraints']
+    TOTAL_REF_OWN_VOLUME = constraint_dict['TOTAL_REF_OWN_VOLUME']
+    TOTAL_REF_INDUSTRY_VOLUME = (
+        constraint_dict['TOTAL_REF_INDUSTRY_VOLUME']
+    )
+    REF_MARKET_SHARE = constraint_dict['REF_MARKET_SHARE']
+    REF_AVG_PRICE_LITER = constraint_dict['REF_AVG_PRICE_LITER']
+    print(f"   Created {len(nl_constraints)} constraints")
 
-    # Step 5: Run Optimization
-    print("\n5. Running optimization...")
-    print("   (This may take several minutes...)")
+    print("\n9. Creating bounds...")
+    bounds = create_bounds(
+        reference_df_padded_bound, sku_lower_bound, sku_upper_bound
+    )
+    print(f"   Created bounds for {len(bounds)} variables")
 
-    (result, monthly_outputs_unrounded, industry_volume_unrounded,
-     rounded_prices, monthly_outputs_rounded,
-     industry_volume_rounded) = optimizer.optimize(
-        constraints=constraints,
-        bounds=bounds,
-        P0=P0,
-        method='trust-constr',
-        options={'disp': True}
+    print("\n10. Validating bounds...")
+    P0 = ref_price_unit.reshape(-1)
+    p_unit_max = P0 + sku_upper_bound
+    test_eval = evaluate_uncached(p_unit_max)
+
+    max_pinc = (test_eval['avg_opt_price'] / REF_AVG_PRICE_LITER - 1)
+    if max_pinc < target_pinc:
+        print(
+            f"   Error: Max PINC ({max_pinc:.4f}) < "
+            f"target ({target_pinc:.4f})"
+        )
+        return None, None
+    else:
+        print(f"   Bounds valid (max PINC: {max_pinc:.4f})")
+
+    print("\n11. Running optimization...")
+    clear_eval_cache()
+
+    res = run_optimization(
+        objective, P0, bounds, nl_constraints,
+        method='trust-constr', maxiter=5000, disp=True
     )
 
-    print(f"\n   ✓ Optimization complete!")
-    print(f"   ✓ Success: {result.success}")
-    print(f"   ✓ Objective value: {result.fun:.2f}")
-    print(f"   ✓ Iterations: {result.nit}")
+    print(f"\n   Optimization status: {res.success}")
+    print(f"   Message: {res.message}")
 
-    # Step 6: Create Summary
-    print("\n6. Creating summary report...")
-    summary_df = create_summary_report(
-        monthly_outputs_rounded,
-        industry_volume_rounded,
-        target_delta,
-        result
+    print("\n12. Checking constraint violations...")
+    for idx, val, lb, ub, viol in constraint_violation_detail(
+        res.x, nl_constraints
+    ):
+        print(
+            f"   Constraint {idx}: val={val:.6g}, lb={lb:.6g}, "
+            f"ub={ub:.6g}, violation={viol:.6g}"
+        )
+
+    print("\n13. Rounding prices...")
+    P_opt_final = res.x.reshape(M, N)
+    P_rounded = round_to_nearest_50(res.x, P0)
+    P_rounded = P_rounded.reshape(M, N)
+
+    print("\n" + "=" * 60)
+    print("ORIGINAL METRICS (Before Rounding):")
+    print("=" * 60)
+    constraint_adherence(
+        P_opt_final, evaluate_uncached, base_total_MACO,
+        TOTAL_REF_OWN_VOLUME, TOTAL_REF_INDUSTRY_VOLUME,
+        REF_MARKET_SHARE, target_pinc, tolerance,
+        segment_labels, size_labels, segment_order, size_order, M, N
     )
-    print("   ✓ Summary report created")
 
-    # Step 7: Export Results
-    print("\n7. Exporting results...")
-    export_results(
-        monthly_outputs_rounded,
-        industry_volume_rounded,
-        summary_df,
-        output_dir=output_dir
+    print("\n" + "=" * 60)
+    print("POST ROUNDING METRICS:")
+    print("=" * 60)
+    constraint_adherence(
+        P_rounded, evaluate_uncached, base_total_MACO,
+        TOTAL_REF_OWN_VOLUME, TOTAL_REF_INDUSTRY_VOLUME,
+        REF_MARKET_SHARE, target_pinc, tolerance,
+        segment_labels, size_labels, segment_order, size_order, M, N
     )
 
-    print("\n" + "="*60)
+    print("\n14. Creating results dataframes...")
+    final_eval = evaluate_uncached(P_rounded.reshape(-1))
+
+    results_df, industry_df = create_results_dataframe(
+        P_rounded, reference_df, seg_mapping, sku_detail_mapping,
+        ref_price_liter, ref_price_unit, ref_vol_own_sellin,
+        NR_ref, MACO_ref, capacity, final_eval, M, N,
+        ref_vol_own_sellout, competitor_reference_df, reference_df_other
+    )
+    print(f"   Results dataframe created with {len(results_df)} rows")
+    print(f"   Industry dataframe created with {len(industry_df)} rows")
+
+    print("\n15. Saving results...")
+    results_df.to_excel(output_path, index=False)
+    print(f"   Results saved to: {output_path}")
+
+    print("\n" + "=" * 60)
     print("OPTIMIZATION COMPLETE")
-    print("="*60)
+    print("=" * 60)
 
-    return result, monthly_outputs_rounded, industry_volume_rounded, summary_df
+    return res, results_df, industry_df
 
 
 if __name__ == "__main__":
-    # Example usage
-    DATA_DIR = r'C:/Users/40107922/Downloads/r2'
-
-    result, monthly_df, industry_df, summary_df = run_optimization(
-        elasticity_path=f'{DATA_DIR}/elasticity.csv',
-        reference_path=f'{DATA_DIR}/subset_reference_abi_sellin-vol_pl-ptc.csv',
-        competitor_elasticity_path=f'{DATA_DIR}/elasticity_competitor.csv',
-        competitor_reference_path=f'{DATA_DIR}/subset_reference_comp_sellout-vol_ptc.csv',
-        seg_mapping_path=f'{DATA_DIR}/segment_mapping.csv',
-        start_period='2025-08',
-        end_period='2025-10',
-        target_delta=0.06,
-        n_jobs=-1,
-        output_dir='optimization_results'
+    base_path = (
+        r'C:/Users/40107922/OneDrive - Anheuser-Busch InBev/'
+        r'hackathon_2025/repo/hackathon_2025/optimization_data/'
     )
 
-    print("\nResults available in variables:")
-    print("  - result: Optimization result object")
-    print("  - monthly_df: Monthly optimization details")
-    print("  - industry_df: Industry volume details")
-    print("  - summary_df: Summary report")
+    result, results_df, industry_df = run_price_optimization(
+        elasticity_path=base_path + 'elasticity.csv',
+        reference_path=(
+            base_path + 'reference_abi_sellin-vol_pl-ptc.csv'
+        ),
+        competitor_elasticity_path=base_path + 'elasticity_competitor.csv',
+        competitor_reference_path=(
+            base_path + 'reference_comp_sellout-vol_ptc.csv'
+        ),
+        seg_mapping_path=base_path + 'segment_mapping.csv',
+        sku_detail_mapping_path=base_path + 'sku_details_mapping.csv',
+        sku_scope_path=base_path + 'sku_scope_subset.csv',
+        start_period='2025-07',
+        end_period='2025-08',
+        target_pinc=0.06,
+        sku_lower_bound=-300,
+        sku_upper_bound=500,
+        output_path='optimization_results/optimization_output.xlsx'
+    )
+
+    if result:
+        print("\nOptimization completed successfully!")
+        print(f"  - Objective value: {result.fun:.2f}")
+        print(f"  - Iterations: {result.nit}")
+        print(f"  - Results shape: {results_df.shape}")
+        print(f"  - Industry shape: {industry_df.shape}")
