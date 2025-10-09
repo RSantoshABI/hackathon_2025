@@ -7,16 +7,15 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import plotly.express as px
-from datetime import datetime, date
+from datetime import date
 from pathlib import Path
 import sys
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / 'optimization'))
 
-from run_optimization import run_price_optimization
-import config
+from run_optimization import run_price_optimization  # noqa: E402
+import config  # noqa: E402
 
 # Page configuration
 st.set_page_config(
@@ -83,19 +82,23 @@ st.markdown("""
         font-weight: bold;
     }
     
-    [data-testid="metric-container"]:nth-child(1) [data-testid="stMetricValue"] {
+    [data-testid="metric-container"]:nth-child(1)
+    [data-testid="stMetricValue"] {
         color: #F6C101;
     }
     
-    [data-testid="metric-container"]:nth-child(2) [data-testid="stMetricValue"] {
+    [data-testid="metric-container"]:nth-child(2)
+    [data-testid="stMetricValue"] {
         color: #FAE96F;
     }
     
-    [data-testid="metric-container"]:nth-child(3) [data-testid="stMetricValue"] {
+    [data-testid="metric-container"]:nth-child(3)
+    [data-testid="stMetricValue"] {
         color: #EC9D00;
     }
     
-    [data-testid="metric-container"]:nth-child(4) [data-testid="stMetricValue"] {
+    [data-testid="metric-container"]:nth-child(4)
+    [data-testid="stMetricValue"] {
         color: #FFF897;
     }
     
@@ -221,7 +224,12 @@ st.markdown("""
     hr {
         border: none;
         height: 2px;
-        background: linear-gradient(90deg, transparent 0%, #F6C101 50%, transparent 100%);
+        background: linear-gradient(
+            90deg,
+            transparent 0%,
+            #F6C101 50%,
+            transparent 100%
+        );
         margin: 2rem 0;
     }
     
@@ -239,7 +247,12 @@ st.markdown("""
     
     /* Progress bar */
     .stProgress > div > div > div > div {
-        background: linear-gradient(90deg, #F6C101 0%, #EC9D00 50%, #DF8D03 100%);
+        background: linear-gradient(
+            90deg,
+            #F6C101 0%,
+            #EC9D00 50%,
+            #DF8D03 100%
+        );
     }
     
     /* Markdown text in cards */
@@ -307,15 +320,18 @@ if 'optimization_run' not in st.session_state:
 if 'results' not in st.session_state:
     st.session_state.results = None
 
+
 def create_date_range():
     """Create valid date range starting from January 2024"""
     min_date = date(config.MIN_YEAR, config.MIN_MONTH, 1)
     max_date = date(2026, 12, 31)
     return min_date, max_date
 
+
 def date_to_period_string(date_obj):
     """Convert date object to YYYY-MM format"""
     return date_obj.strftime("%Y-%m")
+
 
 def run_optimization(
     target_delta, VAT, VILC_GR, start_period, end_period,
@@ -338,7 +354,7 @@ def run_optimization(
         
         # Use uploaded SKU scope or default to all SKUs
         if sku_scope_df is None:
-            sku_scope_path = f'{base_path}/sku_scope_subset.csv'
+            sku_scope_path = f'{base_path}/sku_scope_full.csv'
         else:
             # Save uploaded SKU scope to temp file
             temp_scope_path = f'{base_path}/temp_sku_scope.csv'
@@ -353,7 +369,11 @@ def run_optimization(
         progress_bar.progress(10)
         
         # Create output directory if it doesn't exist
-        output_dir = Path(__file__).parent.parent / 'optimization' / 'optimization_results'
+        output_dir = (
+            Path(__file__).parent.parent
+            / 'optimization'
+            / 'optimization_results'
+        )
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = str(output_dir / 'app_output.xlsx')
         
@@ -464,131 +484,109 @@ def display_landing_page():
     
     st.markdown("---")
     
-    # Create three columns: one large on left, two smaller stacked on right
-    col1, col_right = st.columns([1.5, 1])
-    
-    with col1:
-        # Card 1: Pricing Parameters
+    # Redesigned parameter section: three balanced cards side-by-side
+    card_col1, card_col2, card_col3 = st.columns([1, 1, 1], gap="large")
+
+    # --- Card 1: Pricing Parameters ---
+    with card_col1:
         st.markdown("#### 💰 Pricing Parameters")
-        
-        # Price Increase (PINC) slider with help tooltip
-        st.markdown("**Price Increase Target (PINC) %**", 
-                   help="Target portfolio price increase as a percentage")
         pinc_percent = st.slider(
-            "PINC Slider",
+            "Price Increase Target (PINC) %",
             min_value=config.PINC_MIN,
             max_value=config.PINC_MAX,
             value=config.DEFAULT_PINC_PERCENT,
             step=config.PINC_STEP,
-            label_visibility="collapsed"
         )
-        target_delta = pinc_percent / 100  # Convert to decimal
-        
-        st.markdown(f"**Target Delta:** `{target_delta:.4f}`")
-        
-        # Price bounds
-        st.markdown("")  # Spacing
-        st.markdown(
-            "**Minimum Price Change (PTC)**",
-            help="Minimum price change per SKU in PTC units. "
-                 "Default: -300 PTC. Must be in range [-300, 500]"
-        )
-        sku_lower_bound = st.number_input(
-            "Min Price Change",
-            min_value=-300,
-            max_value=500,
-            value=-300,
-            step=1,
-            label_visibility="collapsed"
-        )
-        
-        st.markdown("")  # Spacing
-        st.markdown(
-            "**Maximum Price Change (PTC)**",
-            help="Maximum price change per SKU in PTC units. "
-                 "Default: 500 PTC. Must be in range [-300, 500]"
-        )
-        sku_upper_bound = st.number_input(
-            "Max Price Change",
-            min_value=-300,
-            max_value=500,
-            value=500,
-            step=1,
-            label_visibility="collapsed"
-        )
-    
-    with col_right:
-        # Card 2: Choose your time period
-        st.markdown("#### 📅 Choose your time period")
-        
+        target_delta = pinc_percent / 100
+        st.caption(f"Target Delta (decimal): {target_delta:.4f}")
+
+        # Arrange min/max price change on one row
+        price_col1, price_col2 = st.columns(2)
+        with price_col1:
+            st.markdown("**Min Price Change (PTC)**", help="Lower bound per SKU (-300 to 500)")
+            sku_lower_bound = st.number_input(
+                "Min PTC",
+                min_value=-300,
+                max_value=500,
+                value=-300,
+                step=1,
+                label_visibility="collapsed"
+            )
+        with price_col2:
+            st.markdown("**Max Price Change (PTC)**", help="Upper bound per SKU (-300 to 500)")
+            sku_upper_bound = st.number_input(
+                "Max PTC",
+                min_value=-300,
+                max_value=500,
+                value=500,
+                step=1,
+                label_visibility="collapsed"
+            )
+
+    # --- Card 2: Time Period ---
+    with card_col2:
+        st.markdown("#### 📅 Time Period")
         min_date, max_date = create_date_range()
-        
-        # Start date picker with help tooltip
-        st.markdown("**Start Period**",
-                   help="Optimization start period (cannot be before January 2024)")
-        start_date = st.date_input(
-            "Start Period Input",
-            value=date(2025, 8, 1),
-            min_value=min_date,
-            max_value=max_date,
-            label_visibility="collapsed"
-        )
-        
-        # End date picker with help tooltip
-        st.markdown("")  # Spacing
-        st.markdown("**End Period**",
-                   help="Optimization end period (must be after January 2024)")
-        end_date = st.date_input(
-            "End Period Input",
-            value=date(2025, 10, 1),
-            min_value=min_date,
-            max_value=max_date,
-            label_visibility="collapsed"
-        )
-        
-        # Validate dates
+        # Dates side by side
+        date_col1, date_col2 = st.columns(2)
+        with date_col1:
+            st.markdown("**Start**", help="Start period (>= Jan 2024)")
+            start_date = st.date_input(
+                "Start Date",
+                value=date(2025, 8, 1),
+                min_value=min_date,
+                max_value=max_date,
+                label_visibility="collapsed"
+            )
+        with date_col2:
+            st.markdown("**End**", help="End period (>= Start)")
+            end_date = st.date_input(
+                "End Date",
+                value=date(2025, 10, 1),
+                min_value=min_date,
+                max_value=max_date,
+                label_visibility="collapsed"
+            )
+
+        # Validation feedback kept local to the card
         if start_date < min_date:
-            st.error(f"❌ Start date cannot be before {min_date.strftime('%B %Y')}")
+            st.error(f"Start date before {min_date.strftime('%b %Y')}")
         if end_date < min_date:
-            st.error(f"❌ End date cannot be before {min_date.strftime('%B %Y')}")
+            st.error(f"End date before {min_date.strftime('%b %Y')}")
         if end_date < start_date:
-            st.error("❌ End date must be after start date")
-        
-        # Convert to period strings
+            st.error("End date must be after start date")
+
         start_period = date_to_period_string(start_date)
         end_period = date_to_period_string(end_date)
-        
-        st.markdown("")  # Add spacing before next card
-        st.markdown("---")  # Separator between the two right cards
-        
-        # Card 3: Additional Parameters
+        st.caption(f"Period: {start_period} → {end_period}")
+
+    # --- Card 3: Additional Parameters ---
+    with card_col3:
         st.markdown("#### ⚙️ Additional Parameters")
-        
-        # VAT input with help tooltip
-        st.markdown("**VAT Rate**", help="Value Added Tax rate")
-        VAT = st.number_input(
-            "VAT Rate Input",
-            min_value=0.0,
-            max_value=1.0,
-            value=config.DEFAULT_VAT,
-            step=0.01,
-            format="%.4f",
-            label_visibility="collapsed"
-        )
-        
-        # VILC Growth Rate with help tooltip
-        st.markdown("")  # Spacing
-        st.markdown("**VILC Growth Rate**",
-                   help="Variable Indirect Labor Cost annual growth rate")
-        VILC_GR = st.number_input(
-            "VILC Growth Rate Input",
-            min_value=0.0,
-            max_value=1.0,
-            value=config.DEFAULT_VILC_GR,
-            step=0.0001,
-            format="%.4f",
-            label_visibility="collapsed"
-        )
+        add_col1, add_col2 = st.columns(2)
+        with add_col1:
+            st.markdown("**VAT Rate**", help="Value Added Tax (0 to 1)")
+            VAT = st.number_input(
+                "VAT",
+                min_value=0.0,
+                max_value=1.0,
+                value=config.DEFAULT_VAT,
+                step=0.01,
+                format="%.4f",
+                label_visibility="collapsed"
+            )
+        with add_col2:
+            st.markdown("**VILC Growth**", help="Annual growth rate (0 to 1)")
+            VILC_GR = st.number_input(
+                "VILC",
+                min_value=0.0,
+                max_value=1.0,
+                value=config.DEFAULT_VILC_GR,
+                step=0.0001,
+                format="%.4f",
+                label_visibility="collapsed"
+            )
+        st.caption(f"VAT: {VAT:.2%} | VILC Growth: {VILC_GR:.2%}")
     
     st.markdown("---")
     
@@ -682,6 +680,10 @@ def calculate_summary_metrics(results):
     """Calculate key summary metrics from results"""
     
     monthly_df = results['monthly_outputs']
+    industry_df = (
+        results['industry_volumes']
+        if 'industry_volumes' in results else None
+    )
     
     # Check if monthly_df has the required columns
     if 'MACO_ref' not in monthly_df.columns:
@@ -712,10 +714,38 @@ def calculate_summary_metrics(results):
     # (can be updated if competitor data is available)
     industry_vol_change = abi_vol_change
     
-    # Market share (assuming 100% for now)
-    ms_ref = 100.0
-    ms_opt = 100.0
-    ms_change = 0.0
+    # Market share (derive from industry_df if available)
+    required_cols = ['manufacturer', 'volume_ref', 'volume_opt']
+    if (
+        industry_df is not None and not industry_df.empty and
+        all(col in industry_df.columns for col in required_cols)
+    ):
+        total_ref_volume = industry_df['volume_ref'].sum()
+        total_opt_volume = industry_df['volume_opt'].sum()
+        abi_ref_volume = (
+            industry_df[industry_df['manufacturer'] == 'ABI'][
+                'volume_ref'
+            ].sum()
+        )
+        abi_opt_volume = (
+            industry_df[industry_df['manufacturer'] == 'ABI'][
+                'volume_opt'
+            ].sum()
+        )
+        ms_ref = (
+            abi_ref_volume / total_ref_volume * 100
+            if total_ref_volume > 0 else 0.0
+        )
+        ms_opt = (
+            abi_opt_volume / total_opt_volume * 100
+            if total_opt_volume > 0 else 0.0
+        )
+        ms_change = ms_opt - ms_ref  # percentage points
+    else:
+        # Fallback if industry dataframe missing
+        ms_ref = 100.0
+        ms_opt = 100.0
+        ms_change = 0.0
     
     # PINC achieved
     ref_ppl = (monthly_df['volume_ref'] * monthly_df['price_liter_ref']).sum()
@@ -730,8 +760,14 @@ def calculate_summary_metrics(results):
     nr_improvement = (total_nr_opt / total_nr_ref - 1) * 100
     
     # Count unique SKUs and months
-    num_skus = monthly_df['sku'].nunique() if 'sku' in monthly_df.columns else len(monthly_df)
-    num_months = monthly_df['year_month'].nunique() if 'year_month' in monthly_df.columns else 1
+    num_skus = (
+        monthly_df['sku'].nunique()
+        if 'sku' in monthly_df.columns else len(monthly_df)
+    )
+    num_months = (
+        monthly_df['year_month'].nunique()
+        if 'year_month' in monthly_df.columns else 1
+    )
     
     return {
         'maco_ref': total_maco_ref,
@@ -752,6 +788,7 @@ def calculate_summary_metrics(results):
         'num_months': num_months
     }
 
+
 def create_card(content, title=None):
     """Helper to create card-styled sections"""
     card_html = f"""
@@ -763,7 +800,10 @@ def create_card(content, title=None):
         margin: 10px 0;
         box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
     ">
-        {f'<h4 style="color: #FAE96F; margin-top: 0;">{title}</h4>' if title else ''}
+        {(
+            f'<h4 style="color: #FAE96F; margin-top: 0;">{title}</h4>'
+            if title else ''
+        )}
         {content}
     </div>
     """
@@ -785,9 +825,11 @@ def display_tabular_summary(results):
         st.markdown("#### 💰 Financial Performance")
         
         financial_data = {
-            'Metric': ['MACO Reference', 'MACO Optimized', 'MACO Change',
-                      'MACO Improvement %', 'NR Reference', 'NR Optimized',
-                      'NR Change', 'NR Improvement %'],
+            'Metric': [
+                'MACO Reference', 'MACO Optimized', 'MACO Change',
+                'MACO Improvement %', 'NR Reference', 'NR Optimized',
+                'NR Change', 'NR Improvement %'
+            ],
             'Value': [
                 f"${metrics['maco_ref']:,.0f}",
                 f"${metrics['maco_opt']:,.0f}",
@@ -824,10 +866,12 @@ def display_tabular_summary(results):
         st.markdown("#### 📈 Volume & Market Metrics")
         
         volume_data = {
-            'Metric': ['ABI Volume Change %', 'Industry Volume Change %',
-                      'Market Share Reference', 'Market Share Optimized',
-                      'Market Share Change', 'PINC Target', 'PINC Achieved',
-                      'Number of SKUs', 'Number of Months'],
+            'Metric': [
+                'ABI Volume Change %', 'Industry Volume Change %',
+                'Market Share Reference', 'Market Share Optimized',
+                'Market Share Change', 'PINC Target', 'PINC Achieved',
+                'Number of SKUs', 'Number of Months'
+            ],
             'Value': [
                 f"{metrics['abi_vol_change_pct']:.2f}%",
                 f"{metrics['industry_vol_change_pct']:.2f}%",
@@ -923,17 +967,25 @@ def display_tabular_summary(results):
         
         # Style with centered values and wrapped headers
         def style_segment(df):
-            return df.style.set_properties(**{
-                'text-align': 'center',
-                'white-space': 'normal',
-                'word-wrap': 'break-word'
-            }, subset=['MACO Change %', 'Volume Change %', 'NR/HL Ref', 
-                      'NR/HL Opt']).set_table_styles([
-                {'selector': 'th', 
-                 'props': [('text-align', 'center'), 
-                          ('white-space', 'normal'),
-                          ('word-wrap', 'break-word'),
-                          ('max-width', '80px')]
+            return df.style.set_properties(
+                **{
+                    'text-align': 'center',
+                    'white-space': 'normal',
+                    'word-wrap': 'break-word'
+                },
+                subset=[
+                    'MACO Change %', 'Volume Change %',
+                    'NR/HL Ref', 'NR/HL Opt'
+                ]
+            ).set_table_styles([
+                {
+                    'selector': 'th',
+                    'props': [
+                        ('text-align', 'center'),
+                        ('white-space', 'normal'),
+                        ('word-wrap', 'break-word'),
+                        ('max-width', '80px')
+                    ]
                 }
             ])
         
@@ -1535,55 +1587,51 @@ def display_constraints_summary(results):
     
     st.markdown("---")
     
-    # Constraint satisfaction visualization
+    # Constraint satisfaction gauge (static)
     st.markdown("#### 🎯 Constraint Satisfaction Overview")
-    
     satisfied_count = sum(1 for c in constraints_data if '✅' in c['Status'])
     total_count = len(constraints_data)
-    
-    col1, col2, col3 = st.columns([1, 2, 1])
-    
-    with col2:
-        fig_gauge = go.Figure(go.Indicator(
-            mode="gauge+number+delta",
-            value=satisfied_count,
-            domain={'x': [0, 1], 'y': [0, 1]},
-            title={
-                'text': "Constraints Satisfied",
-                'font': {'color': '#F6C101', 'size': 20}
+    pct = satisfied_count / total_count if total_count else 0
+
+    gauge_fig = go.Figure(
+        go.Indicator(
+            mode="gauge+number",
+            value=pct * 100,
+            number={
+                'suffix': '%',
+                'font': {'color': '#FAE96F', 'size': 34}
             },
-            delta={'reference': total_count, 'increasing': {'color': "#F6C101"}},
+            title={
+                'text': f"{satisfied_count}/{total_count} Satisfied",
+                'font': {'color': '#e0e0e0', 'size': 16}
+            },
             gauge={
-                'axis': {
-                    'range': [None, total_count],
-                    'tickcolor': '#e0e0e0'
-                },
-                'bar': {'color': "#F6C101"},
-                'bgcolor': "#2d2d2d",
-                'borderwidth': 2,
-                'bordercolor': "#EC9D00",
+                'axis': {'range': [0, 100], 'tickcolor': '#e0e0e0'},
+                'bar': {'color': '#FAE96F'},
+                'bgcolor': '#2d2d2d',
+                'borderwidth': 1,
+                'bordercolor': '#3d3d3d',
                 'steps': [
-                    {'range': [0, total_count/3], 'color': '#C96E12'},
-                    {'range': [total_count/3, 2*total_count/3],
-                     'color': '#DF8D03'},
-                    {'range': [2*total_count/3, total_count],
-                     'color': '#EC9D00'}
+                    {'range': [0, 50], 'color': '#532222'},
+                    {'range': [50, 80], 'color': '#5c4718'},
+                    {'range': [80, 100], 'color': '#264d32'}
                 ],
                 'threshold': {
-                    'line': {'color': "#FAE96F", 'width': 4},
+                    'line': {'color': '#EC9D00', 'width': 4},
                     'thickness': 0.75,
-                    'value': total_count
+                    'value': pct * 100
                 }
             }
-        ))
-        
-        fig_gauge.update_layout(
-            paper_bgcolor='#1a1a1a',
-            font={'color': '#e0e0e0'},
-            height=300
         )
-        
-        st.plotly_chart(fig_gauge, use_container_width=True)
+    )
+    gauge_fig.update_layout(
+        paper_bgcolor='#1a1a1a',
+        plot_bgcolor='#1a1a1a',
+        height=260,
+        margin=dict(l=20, r=20, t=40, b=10),
+        font={'color': '#e0e0e0'}
+    )
+    st.plotly_chart(gauge_fig, use_container_width=True)
     
     st.markdown("---")
     
@@ -1595,13 +1643,15 @@ def display_constraints_summary(results):
     with col_left:
         st.markdown("**Volume Constraints**")
         st.markdown(f"""
-        - **Industry Volume:** {total_opt_volume:,.0f} HL (Ref: {total_ref_volume:,.0f} HL)
+                - **Industry Volume:** {total_opt_volume:,.0f} HL \
+                    (Ref: {total_ref_volume:,.0f} HL)
         - **Change:** {((total_opt_volume/total_ref_volume-1)*100):.2f}%
         - **Lower Bound:** {industry_lower_bound:,.0f} HL
         """)
         
         st.markdown(f"""
-        - **ABI Volume:** {abi_opt_volume:,.0f} HL (Ref: {abi_ref_volume:,.0f} HL)
+                - **ABI Volume:** {abi_opt_volume:,.0f} HL \
+                    (Ref: {abi_ref_volume:,.0f} HL)
         - **Change:** {((abi_opt_volume/abi_ref_volume-1)*100):.2f}%
         - **Bounds:** [{own_lower:,.0f}, {own_upper:,.0f}] HL
         """)
@@ -1617,8 +1667,10 @@ def display_constraints_summary(results):
         st.markdown(f"""
     - **Portfolio PINC:** {pinc_delta:.4%}
     - **Target:** {target_delta:.4%}
-    - **Deviation:** {abs(pinc_delta - target_delta):.4%} (Tol: {tolerance:.2%} rel)
+        - **Deviation:** {abs(pinc_delta - target_delta):.4%} \
+            (Tol: {tolerance:.2%} rel)
         """)
+
 
 def display_results_page():
     """Display the results page with three tabs"""
@@ -1630,9 +1682,13 @@ def display_results_page():
     
     # Success status
     if results['success']:
-        st.success(f"✅ Optimization completed successfully! {results['message']}")
+        st.success(
+            f"✅ Optimization completed successfully! {results['message']}"
+        )
     else:
-        st.warning(f"⚠️ Optimization finished with warnings: {results['message']}")
+        st.warning(
+            f"⚠️ Optimization finished with warnings: {results['message']}"
+        )
     
     # Results Summary Metrics (moved to top)
     st.markdown("### 📈 Results Summary")
@@ -1679,7 +1735,10 @@ def display_results_page():
         with col3:
             st.metric("VILC Growth", f"{results['VILC_GR']:.2%}")
         with col4:
-            st.metric("Period", f"{results['start_period']} to {results['end_period']}")
+            st.metric(
+                "Period",
+                f"{results['start_period']} to {results['end_period']}"
+            )
     
     st.markdown("---")
     
@@ -1723,8 +1782,13 @@ def display_results_page():
     
     with col3:
         # Export to Excel would require additional library
-        st.button("📊 Export Report", use_container_width=True, disabled=True,
-                 help="Excel export coming soon")
+        st.button(
+            "📊 Export Report",
+            use_container_width=True,
+            disabled=True,
+            help="Excel export coming soon"
+        )
+
 
 def main():
     """Main application entry point"""

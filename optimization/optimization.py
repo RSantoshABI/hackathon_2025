@@ -224,8 +224,8 @@ def create_results_dataframe(
     n_skus = len(sku_list)
     n_months = len(month_list)
 
-    sku_repeat = np.repeat(sku_list, n_months)
-    month_tile = np.tile(month_list, n_skus)
+    sku_repeat = np.tile(sku_list, n_months)
+    month_tile = np.repeat(month_list, n_skus)
 
     results_df = pd.DataFrame({
         "sku": sku_repeat,
@@ -257,8 +257,8 @@ def create_results_dataframe(
     comp_n_skus = len(comp_sku_list)
     comp_n_months = len(comp_month_list)
 
-    comp_sku_repeat = np.repeat(comp_sku_list, comp_n_months)
-    comp_month_tile = np.tile(comp_month_list, comp_n_skus)
+    comp_sku_repeat = np.tile(comp_sku_list, comp_n_months)
+    comp_month_tile = np.repeat(comp_month_list, comp_n_skus)
 
     # Get reference volumes in correct order
     comp_ref_vols = []
